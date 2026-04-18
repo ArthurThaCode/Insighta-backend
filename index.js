@@ -38,11 +38,14 @@ function getAgeGroup(age) {
 app.post("/api/profiles", async (req, res) => {
   const { name } = req.body;
 
-  if (!name || typeof name !== "string" || name.trim() === "") {
-    return res.status(400).json({
-      status: "error",
-      message: "Name is required",
-    });
+  if (name === undefined || name === null) {
+    return res.status(400).json({ status: "error", message: "Missing or empty name" });
+  }
+  if (typeof name !== "string") {
+    return res.status(422).json({ status: "error", message: "Invalid type" });
+  }
+  if (name.trim() === "") {
+    return res.status(400).json({ status: "error", message: "Missing or empty name" });
   }
 
   try {
@@ -66,11 +69,16 @@ app.post("/api/profiles", async (req, res) => {
     }
 
     // Appeler les APIs
-    const [genderizeRes, agifyRes, nationalizeRes] = await Promise.all([
-      axios.get(`https://api.genderize.io?name=${encodeURIComponent(name)}`),
-      axios.get(`https://api.agify.io?name=${encodeURIComponent(name)}`),
-      axios.get(`https://api.nationalize.io?name=${encodeURIComponent(name)}`),
-    ]);
+    let genderizeRes, agifyRes, nationalizeRes;
+    try {
+      [genderizeRes, agifyRes, nationalizeRes] = await Promise.all([
+        axios.get(`https://api.genderize.io?name=${encodeURIComponent(name.trim())}`),
+        axios.get(`https://api.agify.io?name=${encodeURIComponent(name.trim())}`),
+        axios.get(`https://api.nationalize.io?name=${encodeURIComponent(name.trim())}`),
+      ]);
+    } catch (err) {
+      return res.status(502).json({ status: "error", message: "Upstream or server failure" });
+    }
 
     const genderize = genderizeRes.data;
     const agify = agifyRes.data;
@@ -81,10 +89,24 @@ app.post("/api/profiles", async (req, res) => {
     const gender_probability = genderize.probability;
     const sample_size = genderize.count;
 
+    if (!gender || sample_size === 0) {
+      return res.status(502).json({ status: "502", message: "Genderize returned an invalid response" });
+    }
+
     const age = agify.age;
+    
+    if (age === null) {
+      return res.status(502).json({ status: "502", message: "Agify returned an invalid response" });
+    }
+    
     const age_group = getAgeGroup(age);
 
     const countries = nationalize.country || [];
+    
+    if (countries.length === 0) {
+      return res.status(502).json({ status: "502", message: "Nationalize returned an invalid response" });
+    }
+    
     const topCountry = countries.sort((a, b) => b.probability - a.probability)[0];
     const country_id = topCountry ? topCountry.country_id : null;
     const country_probability = topCountry ? topCountry.probability : null;
@@ -141,7 +163,7 @@ app.get("/api/profiles/:id", async (req, res) => {
       .single();
 
     if (error) {
-      if (error.code === "PGRST116") {
+      if (error.code === "PGRST116" || error.code === "22P02") {
         return res.status(404).json({
           status: "error",
           message: "Profile not found",
@@ -154,6 +176,67 @@ app.get("/api/profiles/:id", async (req, res) => {
       status: "success",
       data,
     });
+  } catch (error) {
+    console.error("ERROR:", error.message);
+    return res.status(500).json({
+      status: "error",
+      message: error.message,
+    });
+  }
+});
+
+// GET /api/profiles
+app.get("/api/profiles", async (req, res) => {
+  try {
+    let query = supabase.from("profiles").select("*");
+
+    const { gender, country_id, age_group } = req.query;
+
+    if (gender) {
+      query = query.ilike("gender", gender);
+    }
+    if (country_id) {
+      query = query.ilike("country_id", country_id);
+    }
+    if (age_group) {
+      query = query.ilike("age_group", age_group);
+    }
+
+    const { data, error } = await query;
+
+    if (error) {
+      throw error;
+    }
+
+    return res.status(200).json({
+      status: "success",
+      count: data.length,
+      data,
+    });
+  } catch (error) {
+    console.error("ERROR:", error.message);
+    return res.status(500).json({
+      status: "error",
+      message: error.message,
+    });
+  }
+});
+
+// DELETE /api/profiles/{id}
+app.delete("/api/profiles/:id", async (req, res) => {
+  const { id } = req.params;
+
+  try {
+    const { error } = await supabase
+      .from("profiles")
+      .delete()
+      .eq("id", id);
+      
+    if (error) {
+      throw error;
+    }
+
+    return res.status(204).send();
   } catch (error) {
     console.error("ERROR:", error.message);
     return res.status(500).json({
