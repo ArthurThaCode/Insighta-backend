@@ -1,4 +1,4 @@
-﻿require("dotenv").config();
+require("dotenv").config();
 
 const crypto = require("crypto");
 const express = require("express");
@@ -13,8 +13,8 @@ const app = express();
 
 const PORT = process.env.PORT || 3000;
 const WEB_ORIGIN = process.env.WEB_ORIGIN || `http://localhost:${PORT}`;
-const ACCESS_TOKEN_TTL_SECONDS = Number(process.env.ACCESS_TOKEN_TTL_SECONDS || 15 * 60);
-const REFRESH_TOKEN_TTL_SECONDS = Number(process.env.REFRESH_TOKEN_TTL_SECONDS || 7 * 24 * 60 * 60);
+const ACCESS_TOKEN_TTL_SECONDS = Number(process.env.ACCESS_TOKEN_TTL_SECONDS || 3 * 60);
+const REFRESH_TOKEN_TTL_SECONDS = Number(process.env.REFRESH_TOKEN_TTL_SECONDS || 5 * 60);
 const JWT_SECRET = process.env.JWT_SECRET || "dev-only-change-me-before-deploying";
 const GITHUB_CLIENT_ID = process.env.GITHUB_CLIENT_ID;
 const GITHUB_CLIENT_SECRET = process.env.GITHUB_CLIENT_SECRET;
@@ -53,6 +53,7 @@ if (!supabaseUrl || !supabaseKey) {
 const supabase = createClient(supabaseUrl, supabaseKey);
 const PROFILE_COLUMNS =
   "id, name, gender, gender_probability, age, age_group, country_id, country_name, country_probability, created_at";
+const USER_COLUMNS = "id, github_id, username, email, avatar_url, role, is_active, last_login_at, created_at";
 
 const oauthStates = new Map();
 const refreshSessions = new Map();
@@ -140,6 +141,80 @@ function determineRole(githubUser) {
   return DEFAULT_ROLE === "admin" ? "admin" : "analyst";
 }
 
+function mapDbUser(row) {
+  return {
+    id: row.id,
+    github_id: row.github_id,
+    login: row.username,
+    username: row.username,
+    name: row.username,
+    email: row.email,
+    avatar_url: row.avatar_url,
+    role: row.role,
+    is_active: row.is_active,
+  };
+}
+
+async function findUserById(id) {
+  const { data, error } = await supabase.from("users").select(USER_COLUMNS).eq("id", id).single();
+  if (error) return null;
+  return data;
+}
+
+async function createOrUpdateUserFromGithub(githubUser, githubToken) {
+  let email = githubUser.email || null;
+  if (!email && githubToken) {
+    try {
+      const emailRes = await axios.get("https://api.github.com/user/emails", {
+        headers: { Authorization: `Bearer ${githubToken}`, Accept: "application/vnd.github+json" },
+      });
+      const primary = (emailRes.data || []).find((item) => item.primary) || (emailRes.data || [])[0];
+      email = primary ? primary.email : null;
+    } catch (error) {
+      email = null;
+    }
+  }
+
+  const githubId = String(githubUser.id);
+  const desiredRole = determineRole(githubUser);
+  const now = new Date().toISOString();
+  const { data: existing, error: selectError } = await supabase
+    .from("users")
+    .select(USER_COLUMNS)
+    .eq("github_id", githubId)
+    .single();
+
+  if (selectError && selectError.code !== "PGRST116") throw selectError;
+
+  if (existing) {
+    const update = {
+      username: githubUser.login,
+      email,
+      avatar_url: githubUser.avatar_url,
+      role: ADMIN_LOGINS.has(String(githubUser.login || "").toLowerCase()) ? "admin" : existing.role || desiredRole,
+      last_login_at: now,
+    };
+    const { data, error } = await supabase.from("users").update(update).eq("id", existing.id).select(USER_COLUMNS).single();
+    if (error) throw error;
+    return mapDbUser(data);
+  }
+
+  const user = {
+    id: uuidv7(),
+    github_id: githubId,
+    username: githubUser.login,
+    email,
+    avatar_url: githubUser.avatar_url,
+    role: desiredRole,
+    is_active: true,
+    last_login_at: now,
+    created_at: now,
+  };
+  const { data, error } = await supabase.from("users").insert([user]).select(USER_COLUMNS).single();
+  if (error) throw error;
+  return mapDbUser(data);
+}
+
 function issueTokenPair(user) {
   const sessionId = crypto.randomUUID();
   const accessToken = signJwt(
@@ -179,7 +254,7 @@ function extractBearer(req) {
   return header.slice(7).trim();
 }
 
-function authenticate(req, res, next) {
+async function authenticate(req, res, next) {
   const cookies = parseCookies(req);
   const bearer = extractBearer(req);
   const token = bearer || cookies.insighta_access;
@@ -187,18 +262,22 @@ function authenticate(req, res, next) {
 
   try {
     const payload = verifyJwt(token);
+    const dbUser = await findUserById(payload.sub);
+    if (!dbUser) return res.status(401).json({ status: "error", message: "Invalid user session" });
+    if (dbUser.is_active === false) return res.status(403).json({ status: "error", message: "User account is inactive" });
     req.authSource = bearer ? "bearer" : "cookie";
-    req.user = {
-      id: payload.sub,
-      login: payload.login,
-      name: payload.name,
-      avatar_url: payload.avatar_url,
-      role: payload.role,
-    };
+    req.user = mapDbUser(dbUser);
     return next();
   } catch (error) {
     return res.status(401).json({ status: "error", message: "Invalid or expired access token" });
   }
+}
+
+function requireApiVersion(req, res, next) {
+  if (req.headers["x-api-version"] !== "1") {
+    return res.status(400).json({ status: "error", message: "API version header required" });
+  }
+  return next();
 }
 
 function requireRole(...roles) {
@@ -240,9 +319,21 @@ function requestLogger(req, res, next) {
 }
 
 function rateLimit(req, res, next) {
-  const windowMs = Number(process.env.RATE_LIMIT_WINDOW_MS || 60_000);
-  const max = Number(process.env.RATE_LIMIT_MAX || 120);
-  const key = `${req.ip}:${req.user ? req.user.login : "anon"}`;
+  const windowMs = 60_000;
+  const isAuthRoute = req.path.startsWith("/auth/");
+  const max = isAuthRoute ? 10 : 60;
+  let identity = "anon";
+  const bearer = extractBearer(req);
+  const cookieToken = parseCookies(req).insighta_access;
+  const rateToken = bearer || cookieToken;
+  if (rateToken) {
+    try {
+      identity = verifyJwt(rateToken).sub;
+    } catch {
+      identity = "invalid-token";
+    }
+  }
+  const key = `${isAuthRoute ? "auth" : "api"}:${req.ip}:${identity}`;
   const now = Date.now();
   const bucket = rateBuckets.get(key) || { count: 0, resetAt: now + windowMs };
   if (bucket.resetAt <= now) {
@@ -345,26 +436,32 @@ function applyFilters(baseQuery, params) {
   return query;
 }
 
-function paginationMeta(page, limit, total) {
-  const totalPages = Math.ceil((total || 0) / limit);
+function buildPaginationLinks(req, page, limit, totalPages) {
+  const makeLink = (targetPage) => {
+    if (!targetPage || targetPage < 1 || targetPage > totalPages) return null;
+    const params = new URLSearchParams(req.query);
+    params.set("page", String(targetPage));
+    params.set("limit", String(limit));
+    return `${req.baseUrl}${req.path}?${params.toString()}`;
+  };
   return {
-    page,
-    limit,
-    total: total || 0,
-    total_pages: totalPages,
-    has_next: page < totalPages,
-    has_previous: page > 1,
+    self: makeLink(page),
+    next: page < totalPages ? makeLink(page + 1) : null,
+    prev: page > 1 ? makeLink(page - 1) : null,
   };
 }
 
-function paginatedResponse(res, { page, limit, total, data }) {
+function paginatedResponse(req, res, { page, limit, total, data }) {
+  const safeTotal = total || 0;
+  const totalPages = Math.ceil(safeTotal / limit);
   return res.status(200).json({
     status: "success",
-    data: data || [],
-    pagination: paginationMeta(page, limit, total),
     page,
     limit,
-    total: total || 0,
+    total: safeTotal,
+    total_pages: totalPages,
+    links: buildPaginationLinks(req, page, limit, totalPages),
+    data: data || [],
   });
 }
 
@@ -398,7 +495,7 @@ app.get("/health", (req, res) => {
   res.json({ status: "success", data: { service: "insighta-backend", version: "v1" } });
 });
 
-app.get("/auth/github/start", (req, res) => {
+function startGithubAuth(req, res) {
   if (!requireGithubConfig(res)) return;
 
   const mode = req.query.interface === "cli" ? "cli" : "web";
@@ -438,7 +535,10 @@ app.get("/auth/github/start", (req, res) => {
   res.cookie("insighta_pkce_state", state, cookieOptions({ maxAgeSeconds: 600 }));
   res.cookie("insighta_pkce_verifier", verifier, cookieOptions({ maxAgeSeconds: 600 }));
   return res.redirect(authorizeUrl.toString());
-});
+}
+
+app.get("/auth/github", startGithubAuth);
+app.get("/auth/github/start", startGithubAuth);
 
 app.all("/auth/github/callback", async (req, res) => {
   if (!requireGithubConfig(res)) return;
@@ -476,14 +576,10 @@ app.all("/auth/github/callback", async (req, res) => {
       headers: { Authorization: `Bearer ${tokenRes.data.access_token}`, Accept: "application/vnd.github+json" },
     });
 
-    const role = determineRole(githubRes.data);
-    const user = {
-      id: githubRes.data.id,
-      login: githubRes.data.login,
-      name: githubRes.data.name || githubRes.data.login,
-      avatar_url: githubRes.data.avatar_url,
-      role,
-    };
+    const user = await createOrUpdateUserFromGithub(githubRes.data, tokenRes.data.access_token);
+    if (user.is_active === false) {
+      return res.status(403).json({ status: "error", message: "User account is inactive" });
+    }
     const tokenPair = issueTokenPair(user);
 
     if (saved.mode === "cli" || req.accepts("json") === "json") {
@@ -507,7 +603,12 @@ app.post("/auth/refresh", (req, res) => {
   }
   refreshSessions.delete(hashToken(refreshToken));
   const tokenPair = issueTokenPair(session.user);
-  const response = { status: "success", data: { user: session.user, ...tokenPair } };
+  const response = {
+    status: "success",
+    access_token: tokenPair.accessToken,
+    refresh_token: tokenPair.refreshToken,
+    data: { user: session.user, ...tokenPair },
+  };
   if (cookies.insighta_refresh) {
     const csrfToken = sendTokenCookies(res, tokenPair);
     response.data.csrfToken = csrfToken;
@@ -525,6 +626,7 @@ app.post("/auth/logout", (req, res) => {
 
 
 const api = express.Router();
+api.use(requireApiVersion);
 api.use(authenticate);
 api.use(csrfProtection);
 
@@ -640,7 +742,7 @@ api.get("/profiles/search", requireRole("admin", "analyst"), async (req, res) =>
     const { data, error: dataError } = await dataQuery;
     if (dataError) throw dataError;
 
-    return paginatedResponse(res, { page, limit, total, data });
+    return paginatedResponse(req, res, { page, limit, total, data });
   } catch (error) {
     console.error("ERROR:", error.message);
     return res.status(500).json({ status: "error", message: error.message });
@@ -648,6 +750,9 @@ api.get("/profiles/search", requireRole("admin", "analyst"), async (req, res) =>
 });
 
 api.get("/profiles/export", requireRole("admin", "analyst"), async (req, res) => {
+  if (req.query.format && req.query.format !== "csv") {
+    return res.status(422).json({ status: "error", message: "Unsupported export format" });
+  }
   const validation = validateProfileQueryParams({ ...req.query, page: undefined, limit: undefined });
   if (!validation.valid) {
     return res.status(validation.status).json({ status: "error", message: validation.message });
@@ -672,7 +777,8 @@ api.get("/profiles/export", requireRole("admin", "analyst"), async (req, res) =>
     if (error) throw error;
 
     res.setHeader("Content-Type", "text/csv; charset=utf-8");
-    res.setHeader("Content-Disposition", 'attachment; filename="insighta-profiles.csv"');
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    res.setHeader("Content-Disposition", `attachment; filename="profiles_${stamp}.csv"`);
     return res.status(200).send(toCsv(data || []));
   } catch (error) {
     console.error("ERROR:", error.message);
@@ -747,7 +853,7 @@ api.get("/profiles", requireRole("admin", "analyst"), async (req, res) => {
     const { data, error: dataError } = await dataQuery;
     if (dataError) throw dataError;
 
-    return paginatedResponse(res, { page, limit, total, data });
+    return paginatedResponse(req, res, { page, limit, total, data });
   } catch (error) {
     console.error("ERROR:", error.message);
     return res.status(500).json({ status: "error", message: error.message });
@@ -775,4 +881,5 @@ app.use((req, res) => {
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
 });
+
 
