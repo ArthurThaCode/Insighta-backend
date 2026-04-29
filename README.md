@@ -1,250 +1,231 @@
-# Insighta Labs — Profile Intelligence API
+# Insighta Labs+ Backend
 
-A production-ready backend API that collects, stores, and intelligently queries demographic profile data. Built for **Insighta Labs**, a demographic intelligence company.
+Secure Profile Intelligence API for Stage 3. The Stage 2 profile features are still available, now behind GitHub OAuth, short-lived access tokens, refresh sessions, role-based access control, API versioning, CSV export, rate limiting, request logging, a web portal, and a globally installable CLI.
 
-## Features
+## System Architecture
 
-- **Profile Collection** — Enrich names using Genderize, Agify, and Nationalize APIs
-- **Advanced Filtering** — Filter profiles by gender, age, age group, country, and probability scores
-- **Combined Filters** — Stack multiple filter conditions in a single query (AND logic)
-- **Sorting** — Sort results by age, creation date, or gender probability
-- **Pagination** — Offset-based pagination with configurable page size (max 50)
-- **Natural Language Search** — Query profiles using plain English (e.g., *"young males from nigeria"*)
-
-## Tech Stack
-
-- **Runtime:** Node.js
-- **Framework:** Express.js
-- **Database:** Supabase (PostgreSQL)
-- **IDs:** UUID v7 (time-ordered)
-
----
+- **Backend:** Node.js + Express
+- **Database:** Supabase PostgreSQL, using the existing `profiles` table
+- **Auth provider:** GitHub OAuth with PKCE
+- **Interfaces:** shared backend for REST API, browser portal, and CLI
+- **Versioned API:** primary routes live under `/api/v1`; `/api` remains as a compatibility mount
+- **Portal:** static app served from `/portal`
+- **CLI:** `insighta`, configured through `package.json#bin`
 
 ## Setup
-
-### 1. Install dependencies
 
 ```bash
 npm install
 ```
 
-### 2. Configure environment variables
+Create a `.env` file:
 
-Set the following environment variables (via `.env` file locally or dashboard for deployment):
+```env
+SUPABASE_URL=your-supabase-url
+SUPABASE_ANON_KEY=your-supabase-key
+JWT_SECRET=replace-with-a-long-random-secret
+GITHUB_CLIENT_ID=your-github-oauth-app-client-id
+GITHUB_CLIENT_SECRET=your-github-oauth-app-client-secret
+GITHUB_REDIRECT_URI=http://localhost:3000/auth/github/callback
+WEB_ORIGIN=http://localhost:3000
+INSIGHTA_ADMIN_LOGINS=your-github-username
+DEFAULT_ROLE=analyst
+PORT=3000
+```
 
-| Variable | Description |
-|---|---|
-| `SUPABASE_URL` | Your Supabase project URL |
-| `SUPABASE_ANON_KEY` | Your Supabase anon key |
-| `PORT` | Server port (default: 3000) |
-
-### 3. Database schema
-
-The `profiles` table follows this structure:
-
-| Field | Type | Notes |
-|---|---|---|
-| `id` | UUID v7 | Primary key |
-| `name` | VARCHAR + UNIQUE | Full name |
-| `gender` | VARCHAR | `"male"` or `"female"` |
-| `gender_probability` | FLOAT | Confidence score |
-| `age` | INT | Exact age |
-| `age_group` | VARCHAR | `child`, `teenager`, `adult`, `senior` |
-| `country_id` | VARCHAR(2) | ISO code (NG, KE, etc.) |
-| `country_name` | VARCHAR | Full country name |
-| `country_probability` | FLOAT | Confidence score |
-| `created_at` | TIMESTAMP | Auto-generated (UTC ISO 8601) |
-
-### 4. Seed the database
+Then run:
 
 ```bash
 npm run seed
-```
-
-This populates the database with 2026 profiles. Re-running the command will clear and re-insert (no duplicates).
-
-### 5. Start the server
-
-```bash
 npm start
 ```
 
----
+Open the web portal at:
+
+```text
+http://localhost:3000/portal
+```
+
+## Auth Flow
+
+The backend starts OAuth at:
+
+```text
+GET /auth/github/start?interface=web
+GET /auth/github/start?interface=cli
+```
+
+For web users, the server generates a PKCE verifier, stores it temporarily with the OAuth state, sets short-lived HTTP-only PKCE cookies, and redirects to GitHub. The callback exchanges the GitHub code for a GitHub token, reads the GitHub user profile, assigns a role, then sets:
+
+- `insighta_access`: HTTP-only access token cookie
+- `insighta_refresh`: HTTP-only refresh token cookie
+- `insighta_csrf`: readable CSRF token cookie for mutating portal requests
+
+For CLI users, `/auth/github/start?interface=cli` returns the authorization URL, state, and code verifier. The CLI stores the login attempt locally, then sends the GitHub `code`, `state`, and `code_verifier` to `/auth/github/callback`.
+
+## Token Handling
+
+- Access tokens are signed HMAC JWTs with a default 15 minute expiry.
+- Refresh tokens are random opaque tokens stored server-side by SHA-256 hash.
+- Refresh tokens default to 7 days.
+- `/auth/refresh` rotates refresh tokens and returns a new access token.
+- `/auth/logout` revokes the current refresh token.
+- The browser uses HTTP-only cookies.
+- The CLI stores credentials at:
+
+```text
+~/.insighta/credentials.json
+```
+
+## Role Enforcement
+
+Roles are derived after GitHub login:
+
+- GitHub usernames in `INSIGHTA_ADMIN_LOGINS` become `admin`
+- all other users become `analyst`, unless `DEFAULT_ROLE=admin`
+
+Access rules:
+
+- `admin`: create profiles, delete profiles, read/search/export profiles
+- `analyst`: read/search/export profiles only
+
+Every `/api/v1` endpoint requires authentication and role checks. Browser mutating requests also require `X-CSRF-Token`.
 
 ## API Endpoints
 
-### `POST /api/profiles`
+All routes below require authentication.
 
-Create a new profile by enriching a name via external APIs.
+### Session
 
-**Request:**
-```json
-{ "name": "john" }
+```text
+GET /api/v1/session/me
 ```
 
-**Response (201):**
+### Profiles
+
+```text
+POST   /api/v1/profiles          admin only
+GET    /api/v1/profiles          admin, analyst
+GET    /api/v1/profiles/:id      admin, analyst
+DELETE /api/v1/profiles/:id      admin only
+GET    /api/v1/profiles/search   admin, analyst
+GET    /api/v1/profiles/export   admin, analyst
+```
+
+Filtering, sorting, pagination, and natural language search from Stage 2 remain intact.
+
+### Updated Pagination Shape
+
+List and search responses now include a `pagination` object:
+
 ```json
 {
   "status": "success",
-  "data": {
-    "id": "019...",
-    "name": "john",
-    "gender": "male",
-    "gender_probability": 0.99,
-    "age": 25,
-    "age_group": "adult",
-    "country_id": "US",
-    "country_name": "United States",
-    "country_probability": 0.85,
-    "created_at": "2026-04-22T10:00:00.000Z"
+  "data": [],
+  "pagination": {
+    "page": 1,
+    "limit": 10,
+    "total": 0,
+    "total_pages": 0,
+    "has_next": false,
+    "has_previous": false
   }
 }
 ```
 
----
+The legacy `page`, `limit`, and `total` fields are also kept for compatibility.
 
-### `GET /api/profiles`
+### CSV Export
 
-Retrieve profiles with advanced filtering, sorting, and pagination.
-
-#### Query Parameters
-
-| Parameter | Type | Description | Example |
-|---|---|---|---|
-| `gender` | string | Filter by gender (`male` or `female`) | `?gender=male` |
-| `age_group` | string | Filter by age group (`child`, `teenager`, `adult`, `senior`) | `?age_group=adult` |
-| `country_id` | string | Filter by ISO country code | `?country_id=NG` |
-| `min_age` | integer | Minimum age (inclusive) | `?min_age=25` |
-| `max_age` | integer | Maximum age (inclusive) | `?max_age=40` |
-| `min_gender_probability` | float | Minimum gender confidence (0–1) | `?min_gender_probability=0.8` |
-| `min_country_probability` | float | Minimum country confidence (0–1) | `?min_country_probability=0.5` |
-| `sort_by` | string | Sort field: `age`, `created_at`, `gender_probability` | `?sort_by=age` |
-| `order` | string | Sort direction: `asc` or `desc` | `?order=desc` |
-| `page` | integer | Page number (default: 1) | `?page=2` |
-| `limit` | integer | Results per page (default: 10, max: 50) | `?limit=20` |
-
-All filters can be **combined**. Results match **all** conditions (AND logic).
-
-**Example:** `/api/profiles?gender=male&country_id=NG&min_age=25&sort_by=age&order=desc&page=1&limit=10`
-
-**Response:**
-```json
-{
-  "status": "success",
-  "page": 1,
-  "limit": 10,
-  "total": 142,
-  "data": [ ... ]
-}
+```text
+GET /api/v1/profiles/export?gender=male&country_id=NG
 ```
 
----
+The export endpoint accepts the same filters and sorting parameters as `GET /api/v1/profiles` and returns `text/csv`.
 
-### `GET /api/profiles/:id`
+## CLI Usage
 
-Retrieve a single profile by UUID.
+Install globally from this repository:
 
-**Response (200):**
-```json
-{
-  "status": "success",
-  "data": { ... }
-}
+```bash
+npm link
 ```
 
-**Response (404):**
-```json
-{
-  "status": "error",
-  "message": "Profile not found"
-}
+Login:
+
+```bash
+insighta login --api http://localhost:3000
+insighta callback --code <code> --state <state>
 ```
 
----
+Commands:
 
-### `GET /api/profiles/search`
-
-Search profiles using **natural language queries**. The system interprets plain English and converts it into database filters. Pagination (`page`, `limit`) also applies to this endpoint.
-
-#### Query Parameters
-
-| Parameter | Type | Description |
-|---|---|---|
-| `q` | string | Natural language query (**required**) |
-| `page` | integer | Page number (default: 1) |
-| `limit` | integer | Results per page (default: 10, max: 50) |
-
-#### Supported Patterns
-
-| Query Example | Interpreted Filters |
-|---|---|
-| `"young males"` | gender=male, min_age=16, max_age=24 |
-| `"females above 30"` | gender=female, min_age=30 |
-| `"people from angola"` | country_id=AO |
-| `"adult males from kenya"` | gender=male, age_group=adult, country_id=KE |
-| `"male and female teenagers above 17"` | age_group=teenager, min_age=17 |
-| `"senior women from nigeria"` | gender=female, age_group=senior, country_id=NG |
-| `"children under 10"` | age_group=child, max_age=10 |
-
-#### How the NLP Parser Works
-
-The parser uses a **rule-based approach** (no AI or LLMs):
-
-1. **Gender Detection** — Matches keywords: `male/males/men/man` → male, `female/females/women/woman` → female. If both are present, no gender filter is applied.
-2. **Age Group Detection** — Maps keywords to groups: `teenager/teen`, `child/kid`, `adult`, `senior/elderly`
-3. **"Young" Keyword** — Special case: maps to age range 16–24 (not a stored age group)
-4. **Age Ranges** — Parses patterns like `"above 30"`, `"under 18"`, `"between 20 and 30"`, `"older than 40"`
-5. **Country Detection** — Extracts country from `"from <country>"` patterns, maps names to ISO codes using a comprehensive dictionary of 70+ countries
-6. **Neutral Words** — Words like `people`, `persons`, `profiles` are recognized as valid but don't generate filters
-
-If no pattern is recognized, the endpoint returns:
-```json
-{ "status": "error", "message": "Unable to interpret query" }
+```bash
+insighta me
+insighta profiles --page 1 --limit 10 --gender male
+insighta search "young males from nigeria"
+insighta create "Ada"
+insighta delete <profile-id>
+insighta export --out profiles.csv
+insighta logout
 ```
 
-**Example:** `/api/profiles/search?q=young males from nigeria&page=1&limit=10`
+The CLI refreshes access tokens automatically when they are close to expiry.
 
-**Response:**
-```json
-{
-  "status": "success",
-  "page": 1,
-  "limit": 10,
-  "total": 9,
-  "data": [ ... ]
-}
+## Natural Language Parsing Approach
+
+The parser is rule-based and lives in `src/services/nlpParser.js`. It does not use an LLM. It recognizes:
+
+- gender words like `male`, `men`, `female`, `women`
+- age groups like `child`, `teenager`, `adult`, `senior`
+- age ranges like `above 30`, `under 18`, `between 20 and 30`
+- country phrases like `from nigeria` or `in kenya`
+- neutral words like `people`, `profiles`, and `all`
+
+Recognized phrases are converted into the same structured filters used by the normal profile list endpoint.
+
+## Rate Limiting and Logging
+
+The backend applies an in-memory rate limit to all requests. Defaults:
+
+```env
+RATE_LIMIT_WINDOW_MS=60000
+RATE_LIMIT_MAX=120
 ```
 
----
+Every request is logged as JSON with timestamp, method, path, status, duration, IP, and authenticated GitHub login when available.
 
-### `DELETE /api/profiles/:id`
+## CI/CD
 
-Delete a profile by UUID. Returns `204 No Content` on success.
+A lightweight syntax check is available:
 
----
-
-## Error Handling
-
-All errors follow a consistent format:
-
-```json
-{ "status": "error", "message": "<error description>" }
+```bash
+npm run check
 ```
 
-| HTTP Code | Meaning |
-|---|---|
-| `400` | Missing or empty parameter |
-| `422` | Invalid parameter type or value |
-| `404` | Profile not found |
-| `500` | Internal server error |
-| `502` | Upstream API failure |
+Recommended CI pipeline:
 
----
+```yaml
+name: ci
+on: [push, pull_request]
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci
+      - run: npm run check
+```
 
-## CORS
+## Submission
 
-The API includes `Access-Control-Allow-Origin: *` for cross-origin access.
+Run `/submit` in `stage-3-backend` and provide:
 
-## Deployment
-
-Deploy to any Node.js hosting platform (Railway, Render, Fly.io, etc.) with the required environment variables set in the platform dashboard.
+- Backend repository URL
+- CLI repository URL
+- Web portal repository URL
+- Live backend URL
+- Live web portal URL
