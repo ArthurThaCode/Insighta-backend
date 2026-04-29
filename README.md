@@ -216,14 +216,3 @@ jobs:
       - run: npm ci
       - run: npm run check
 ```
-
-## Submission
-
-Run `/submit` in `stage-3-backend` and provide:
-
-- Backend repository URL
-- CLI repository URL
-- Web portal repository URL
-- Live backend URL
-- Live web portal URL
-
