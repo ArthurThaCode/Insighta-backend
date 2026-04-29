@@ -544,8 +544,8 @@ app.all("/auth/github/callback", async (req, res) => {
   if (!requireGithubConfig(res)) return;
 
   const cookies = parseCookies(req);
-  const code = req.query.code || req.body.code;
-  const state = req.query.state || req.body.state || cookies.insighta_pkce_state;
+  const code = req.query.code || (req.body && req.body.code);
+  const state = req.query.state || (req.body && req.body.state) || cookies.insighta_pkce_state;
   const saved = oauthStates.get(state);
 
   if (!code || !state || !saved || saved.expiresAt < Date.now()) {
@@ -553,7 +553,7 @@ app.all("/auth/github/callback", async (req, res) => {
   }
 
   oauthStates.delete(state);
-  const verifier = req.body.code_verifier || req.query.code_verifier || cookies.insighta_pkce_verifier || saved.verifier;
+  const verifier = (req.body && req.body.code_verifier) || req.query.code_verifier || cookies.insighta_pkce_verifier || saved.verifier;
 
   try {
     const tokenPayload = {
