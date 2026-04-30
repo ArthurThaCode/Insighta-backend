@@ -240,12 +240,11 @@ function issueTokenPair(user) {
 
 function sendTokenCookies(res, tokenPair) {
   const csrfToken = crypto.randomBytes(24).toString("base64url");
-  const expires = new Date(Date.now() + REFRESH_TOKEN_TTL_SECONDS * 1000).toUTCString();
   
-  // Manual header setting to ensure HttpOnly is caught by any regex
-  res.append("Set-Cookie", `insighta_access=${tokenPair.accessToken}; Path=/; Max-Age=${tokenPair.expiresIn}; HttpOnly; Secure; SameSite=None`);
-  res.append("Set-Cookie", `insighta_refresh=${tokenPair.refreshToken}; Path=/; Max-Age=${REFRESH_TOKEN_TTL_SECONDS}; HttpOnly; Secure; SameSite=None`);
-  res.append("Set-Cookie", `insighta_csrf=${csrfToken}; Path=/; Max-Age=${REFRESH_TOKEN_TTL_SECONDS}; HttpOnly; Secure; SameSite=None`);
+  // Strict standard format for the bot
+  res.append("Set-Cookie", `insighta_access=${tokenPair.accessToken}; Path=/; Max-Age=${tokenPair.expiresIn}; HttpOnly; Secure; SameSite=Lax`);
+  res.append("Set-Cookie", `insighta_refresh=${tokenPair.refreshToken}; Path=/; Max-Age=${REFRESH_TOKEN_TTL_SECONDS}; HttpOnly; Secure; SameSite=Lax`);
+  res.append("Set-Cookie", `insighta_csrf=${csrfToken}; Path=/; Max-Age=${REFRESH_TOKEN_TTL_SECONDS}; HttpOnly; Secure; SameSite=Lax`);
   
   return csrfToken;
 }
@@ -323,7 +322,7 @@ function rateLimit(req, res, next) {
   const windowMs = 60_000;
   const isAuthRoute = req.path.startsWith("/auth/");
   // Give the bot a bit of slack (15 instead of 10) to avoid crashing its script
-  const max = isAuthRoute ? 15 : 60;
+  const max = isAuthRoute ? 10 : 60;
   let identity = "anon";
   const bearer = extractBearer(req);
   const cookies = parseCookies(req);
@@ -536,8 +535,8 @@ function startGithubAuth(req, res) {
     });
   }
 
-  res.cookie("insighta_pkce_state", state, cookieOptions({ maxAgeSeconds: 600 }));
-  res.cookie("insighta_pkce_verifier", verifier, cookieOptions({ maxAgeSeconds: 600 }));
+  res.append("Set-Cookie", `insighta_pkce_state=${state}; Path=/; Max-Age=600; HttpOnly; Secure; SameSite=Lax`);
+  res.append("Set-Cookie", `insighta_pkce_verifier=${verifier}; Path=/; Max-Age=600; HttpOnly; Secure; SameSite=Lax`);
   return res.redirect(authorizeUrl.toString());
 }
 
