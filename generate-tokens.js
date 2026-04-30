@@ -2,8 +2,13 @@ require("dotenv").config();
 const crypto = require("crypto");
 
 const JWT_SECRET = process.env.JWT_SECRET || "dev-only-change-me-before-deploying";
-// 2 hours TTL — enough time for the grader to run
+// Long TTL: 2 hours — so the tokens stay valid during grading
 const TOKEN_TTL = 2 * 60 * 60;
+
+if (JWT_SECRET === "dev-only-change-me-before-deploying") {
+  console.error("\nERROR: JWT_SECRET is not set in .env — tokens will NOT match Railway!\n");
+  process.exit(1);
+}
 
 function base64url(input) {
   return Buffer.from(input).toString("base64url");
@@ -48,18 +53,20 @@ const analystUser = {
 
 const adminAccessToken = signJwt(adminUser, TOKEN_TTL);
 const analystAccessToken = signJwt(analystUser, TOKEN_TTL);
-const adminRefreshToken = crypto.randomBytes(48).toString("base64url");
+// Refresh token must match what the server registers — use /api/test-tokens for that
+// This is just a placeholder for the form refresh field
+const adminRefreshPlaceholder = "USE_SERVER_ENDPOINT_SEE_BELOW";
 
 console.log("\n========================================");
 console.log("  INSIGHTA TEST TOKENS (valides 2h)");
+console.log("  Signés avec la VRAIE clé Railway");
 console.log("========================================\n");
 console.log(">>> Admin Test Token:");
 console.log(adminAccessToken);
 console.log("\n>>> Analyst Test Token:");
 console.log(analystAccessToken);
-console.log("\n>>> Refresh Test Token (pour admin):");
-console.log(adminRefreshToken);
-console.log("\n========================================");
-console.log("Copiez ces valeurs dans le formulaire HNG.");
-console.log("Soumettez IMMEDIATEMENT apres avoir copie !");
-console.log("========================================\n");
+console.log("\n>>> IMPORTANT — Pour le Refresh Test Token:");
+console.log("    Appelez ce endpoint juste avant de soumettre:");
+console.log("    curl https://backendhng-production.up.railway.app/api/test-tokens");
+console.log("    Utilisez la valeur 'admin_refresh_token' du résultat.");
+console.log("\n========================================\n");
