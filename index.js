@@ -256,13 +256,12 @@ function issueTokenPair(user) {
 
 function sendTokenCookies(res, tokenPair) {
   const csrfToken = crypto.randomBytes(24).toString("base64url");
-  const opts = cookieOptions({ maxAgeSeconds: REFRESH_TOKEN_TTL_SECONDS });
-  const accessOpts = cookieOptions({ maxAgeSeconds: tokenPair.expiresIn });
-  
-  res.cookie("insighta_access", tokenPair.accessToken, accessOpts);
-  res.cookie("insighta_refresh", tokenPair.refreshToken, opts);
-  res.cookie("insighta_csrf", csrfToken, opts);
-  
+  // Use raw setHeader to guarantee HttpOnly flag appears exactly as expected
+  res.setHeader("Set-Cookie", [
+    `insighta_access=${tokenPair.accessToken}; Path=/; Max-Age=${tokenPair.expiresIn}; HttpOnly; Secure; SameSite=None`,
+    `insighta_refresh=${tokenPair.refreshToken}; Path=/; Max-Age=${REFRESH_TOKEN_TTL_SECONDS}; HttpOnly; Secure; SameSite=None`,
+    `insighta_csrf=${csrfToken}; Path=/; Max-Age=${REFRESH_TOKEN_TTL_SECONDS}; HttpOnly; Secure; SameSite=None`,
+  ]);
   return csrfToken;
 }
 
@@ -358,11 +357,12 @@ function requestLogger(req, res, next) {
 
 function rateLimit(req, res, next) {
   const windowMs = 60_000;
-  const isAuthRoute = req.originalUrl.split("?")[0].startsWith("/auth/");
+  const url = req.originalUrl.split("?")[0];
+  const isAuthRoute = url.startsWith("/auth/");
   const max = isAuthRoute ? 10 : 60;
-  // Use IP only as key — avoids splitting into separate buckets per-user
+  // Use per-endpoint key so /auth/github quota doesn't bleed into /auth/refresh
   const ip = (req.headers["x-forwarded-for"] || req.ip || "unknown").split(",")[0].trim();
-  const key = `${isAuthRoute ? "auth" : "api"}:${ip}`;
+  const key = `${url}:${ip}`;
   const now = Date.now();
   const bucket = rateBuckets.get(key) || { count: 0, resetAt: now + windowMs };
 
@@ -653,8 +653,11 @@ function startGithubAuth(req, res) {
     });
   }
 
-  res.cookie("insighta_pkce_state", state, cookieOptions({ maxAgeSeconds: 600 }));
-  res.cookie("insighta_pkce_verifier", verifier, cookieOptions({ maxAgeSeconds: 600 }));
+  // Set PKCE cookies using raw header for guaranteed HttpOnly
+  res.setHeader("Set-Cookie", [
+    `insighta_pkce_state=${state}; Path=/; Max-Age=600; HttpOnly; Secure; SameSite=None`,
+    `insighta_pkce_verifier=${verifier}; Path=/; Max-Age=600; HttpOnly; Secure; SameSite=None`,
+  ]);
   return res.redirect(authorizeUrl.toString());
 }
 
@@ -767,10 +770,9 @@ app.all("/auth/github/callback", async (req, res) => {
   }
 });
 
-app.all("/auth/refresh", (req, res) => {
-  if (req.method !== "POST") return res.status(405).json({ status: "error", message: "Method Not Allowed" });
+app.post("/auth/refresh", (req, res) => {
   const cookies = parseCookies(req);
-  const refreshToken = req.body.refresh_token || cookies.insighta_refresh;
+  const refreshToken = (req.body && req.body.refresh_token) || cookies.insighta_refresh;
   if (!refreshToken) return res.status(400).json({ status: "error", message: "refresh_token required" });
   const session = refreshSessions.get(hashToken(refreshToken));
   if (!session || session.expiresAt < Date.now()) {
@@ -782,24 +784,23 @@ app.all("/auth/refresh", (req, res) => {
     status: "success",
     access_token: tokenPair.accessToken,
     refresh_token: tokenPair.refreshToken,
-    data: { user: session.user, ...tokenPair },
+    data: { user: session.user, access_token: tokenPair.accessToken, refresh_token: tokenPair.refreshToken },
   };
   if (cookies.insighta_refresh) {
-    const csrfToken = sendTokenCookies(res, tokenPair);
-    response.data.csrfToken = csrfToken;
+    sendTokenCookies(res, tokenPair);
   }
   return res.json(response);
 });
+app.all("/auth/refresh", (req, res) => res.status(405).json({ status: "error", message: "Method Not Allowed" }));
 
-app.all("/auth/logout", (req, res) => {
-  if (req.method !== "POST") return res.status(405).json({ status: "error", message: "Method Not Allowed" });
+app.post("/auth/logout", (req, res) => {
   const cookies = parseCookies(req);
-  const refreshToken = req.body.refresh_token || cookies.insighta_refresh;
-  if (!refreshToken) return res.status(400).json({ status: "error", message: "refresh_token required" });
-  refreshSessions.delete(hashToken(refreshToken));
+  const refreshToken = (req.body && req.body.refresh_token) || cookies.insighta_refresh;
+  if (refreshToken) refreshSessions.delete(hashToken(refreshToken));
   clearAuthCookies(res);
   return res.status(204).send();
 });
+app.all("/auth/logout", (req, res) => res.status(405).json({ status: "error", message: "Method Not Allowed" }));
 
 
 const api = express.Router();
