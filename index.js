@@ -929,8 +929,9 @@ api.get("/profiles", requireRole("admin", "analyst"), async (req, res) => {
 
 api.delete("/profiles/:id", requireRole("admin"), async (req, res) => {
   try {
-    const { error } = await supabase.from("profiles").delete().eq("id", req.params.id);
-    if (error) throw error;
+    const { data, error } = await supabase.from("profiles").delete().eq("id", req.params.id).select("id");
+    if (error && error.code !== "22P02") throw error;
+    if (!data || data.length === 0) return res.status(404).json({ status: "error", message: "Profile not found" });
     return res.status(204).send();
   } catch (error) {
     console.error("ERROR:", error.message);
