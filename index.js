@@ -564,10 +564,16 @@ app.all("/auth/github/callback", async (req, res) => {
 
   if (!requireGithubConfig(res)) return;
 
-  const state = req.query.state || (req.body && req.body.state) || cookies.insighta_pkce_state;
+  const state = req.query.state || (req.body && req.body.state);
   const saved = oauthStates.get(state);
 
   if (!code || !state || !saved || saved.expiresAt < Date.now()) {
+    return res.status(400).json({ status: "error", message: "Invalid or expired OAuth state" });
+  }
+
+  // The browser finishing the login must be the one that started it, otherwise an attacker could
+  // make a victim's browser sign in to the attacker's account (login CSRF).
+  if (saved.mode !== "cli" && cookies.insighta_pkce_state !== state) {
     return res.status(400).json({ status: "error", message: "Invalid or expired OAuth state" });
   }
 

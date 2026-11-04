@@ -74,7 +74,7 @@ GET /auth/github/start?interface=web
 GET /auth/github/start?interface=cli
 ```
 
-For web users, the server generates a PKCE verifier, stores it temporarily with the OAuth state, sets short-lived HTTP-only PKCE cookies, and redirects to GitHub. The callback exchanges the GitHub code for a GitHub token, reads the GitHub user profile, assigns a role, then sets:
+For web users, the server generates a PKCE verifier, stores it temporarily with the OAuth state, sets short-lived HTTP-only PKCE cookies, and redirects to GitHub. The callback requires the `state` to match the browser's PKCE cookie, which protects against login CSRF. It then exchanges the GitHub code for a GitHub token, reads the GitHub user profile, assigns a role, then sets:
 
 - `insighta_access`: HTTP-only access token cookie
 - `insighta_refresh`: HTTP-only refresh token cookie

@@ -61,8 +61,30 @@ describe("authentication", () => {
       const start = await request(t.app).get("/auth/github/start?interface=web");
       const state = new URL(start.headers.location).searchParams.get("state");
       const url = `/auth/github/callback?code=gh-admin&state=${state}`;
-      expect((await request(t.app).get(url)).status).toBe(302);
-      expect((await request(t.app).get(url)).status).toBe(400);
+      const cookie = `insighta_pkce_state=${state}`;
+      expect((await request(t.app).get(url).set("Cookie", cookie)).status).toBe(302);
+      expect((await request(t.app).get(url).set("Cookie", cookie)).status).toBe(400);
+    });
+
+    it("rejects a callback from a browser that did not start the login", async () => {
+      const attacker = await request(t.app).get("/auth/github/start?interface=web");
+      const state = new URL(attacker.headers.location).searchParams.get("state");
+      const url = `/auth/github/callback?code=gh-admin&state=${state}`;
+
+      for (const victimCookie of [null, "insighta_pkce_state=another-state"]) {
+        const attempt = request(t.app).get(url);
+        if (victimCookie) attempt.set("Cookie", victimCookie);
+        const response = await attempt;
+        expect(response.status).toBe(400);
+        expect(response.headers["set-cookie"]).toBeUndefined();
+      }
+    });
+
+    it("does not fall back to the state cookie when the state parameter is missing", async () => {
+      const victim = await request(t.app).get("/auth/github/start?interface=web");
+      const state = new URL(victim.headers.location).searchParams.get("state");
+      const response = await request(t.app).get("/auth/github/callback?code=gh-admin").set("Cookie", `insighta_pkce_state=${state}`);
+      expect(response.status).toBe(400);
     });
 
     it("assigns the role from the admin list", async () => {
