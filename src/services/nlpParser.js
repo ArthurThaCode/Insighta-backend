@@ -17,7 +17,7 @@ const { findCountryCode } = require("../utils/countries");
 /**
  * Parse a natural language query into filter parameters.
  * @param {string} query - The natural language query string
- * @returns {{ filters: object } | { error: string }} - Parsed filters or error
+ * @returns {{ filters: object } | { error: string, status?: number }} - Parsed filters or error
  */
 function parseNaturalLanguageQuery(query) {
   if (!query || typeof query !== "string" || query.trim() === "") {
@@ -108,10 +108,9 @@ function parseNaturalLanguageQuery(query) {
   if (fromMatch) {
     const countryStr = fromMatch[1].trim();
     const code = findCountryCode(countryStr);
-    if (code) {
-      filters.country_id = code;
-      matched = true;
-    }
+    if (!code) return { error: "Unable to interpret query" };
+    filters.country_id = code;
+    matched = true;
   }
 
   // --- Country detection: "in <country>" ---
@@ -120,10 +119,9 @@ function parseNaturalLanguageQuery(query) {
     if (inMatch) {
       const countryStr = inMatch[1].trim();
       const code = findCountryCode(countryStr);
-      if (code) {
-        filters.country_id = code;
-        matched = true;
-      }
+      if (!code) return { error: "Unable to interpret query" };
+      filters.country_id = code;
+      matched = true;
     }
   }
 
@@ -134,6 +132,10 @@ function parseNaturalLanguageQuery(query) {
 
   if (!matched) {
     return { error: "Unable to interpret query" };
+  }
+
+  if (filters.min_age !== undefined && filters.max_age !== undefined && filters.min_age > filters.max_age) {
+    return { error: "Invalid query parameters", status: 422 };
   }
 
   return { filters };

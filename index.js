@@ -790,10 +790,15 @@ api.get("/profiles/search", requireRole("admin", "analyst"), async (req, res) =>
   }
 
   const result = parseNaturalLanguageQuery(q);
-  if (result.error) return res.status(400).json({ status: "error", message: result.error });
+  if (result.error) return res.status(result.status || 400).json({ status: "error", message: result.error });
 
-  const page = rawPage ? Math.max(1, parseInt(rawPage, 10) || 1) : 1;
-  const limit = rawLimit ? Math.min(50, Math.max(1, parseInt(rawLimit, 10) || 10)) : 10;
+  const validation = validateProfileQueryParams({ page: rawPage, limit: rawLimit });
+  if (!validation.valid) {
+    return res.status(validation.status).json({ status: "error", message: validation.message });
+  }
+
+  const page = rawPage ? parseInt(rawPage, 10) : 1;
+  const limit = rawLimit ? parseInt(rawLimit, 10) : 10;
   const offset = (page - 1) * limit;
 
   try {
