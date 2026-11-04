@@ -286,29 +286,9 @@ async function authenticate(req, res, next) {
 
   try {
     const payload = verifyJwt(token);
-    // Try to find user in DB first
-    let user = null;
-    if (payload.sub) {
-      const { data } = await supabase.from("users").select(USER_COLUMNS).eq("id", payload.sub).single();
-      if (data) user = mapDbUser(data);
-    }
-    // Fall back to the JWT claims when the user row is not available
-    if (!user) {
-      user = {
-        id: String(payload.sub || payload.id || ""),
-        github_id: String(payload.github_id || ""),
-        login: String(payload.login || payload.username || ""),
-        username: String(payload.username || payload.login || ""),
-        name: String(payload.name || payload.username || ""),
-        email: String(payload.email || ""),
-        avatar_url: String(payload.avatar_url || ""),
-        role: String(payload.role || "analyst"),
-        is_active: true,
-      };
-      if (!user.id || !user.role) {
-        return res.status(401).json({ status: "error", message: "Invalid user session" });
-      }
-    }
+    const row = payload.sub ? await findUserById(payload.sub) : null;
+    if (!row) return res.status(401).json({ status: "error", message: "Invalid user session" });
+    const user = mapDbUser(row);
     if (user.is_active === false) return res.status(403).json({ status: "error", message: "User account is inactive" });
     req.authSource = bearer ? "bearer" : "cookie";
     req.user = user;
