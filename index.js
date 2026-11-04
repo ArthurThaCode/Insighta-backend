@@ -607,6 +607,7 @@ app.all("/auth/github/callback", async (req, res) => {
         status: "success", 
         access_token: tokenPair.accessToken,
         refresh_token: tokenPair.refreshToken,
+        expires_in: tokenPair.expiresIn,
         data: { 
           user, 
           access_token: tokenPair.accessToken,
@@ -639,6 +640,7 @@ app.post("/auth/refresh", (req, res) => {
     status: "success",
     access_token: tokenPair.accessToken,
     refresh_token: tokenPair.refreshToken,
+    expires_in: tokenPair.expiresIn,
     data: { user: session.user, access_token: tokenPair.accessToken, refresh_token: tokenPair.refreshToken },
   };
   if (cookies.insighta_refresh) {
