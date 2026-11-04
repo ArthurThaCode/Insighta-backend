@@ -45,6 +45,19 @@ describe("rate limit", () => {
     expect((await health("10.0.0.5")).status).toBe(200);
   });
 
+  it("removes expired counters from memory", async () => {
+    await health("10.0.0.7");
+    await health("10.0.0.8");
+    expect(t.app.rateBuckets.has("api:10.0.0.7")).toBe(true);
+
+    await new Promise((resolve) => setTimeout(resolve, 1100));
+    await health("10.0.0.9");
+
+    expect(t.app.rateBuckets.has("api:10.0.0.7")).toBe(false);
+    expect(t.app.rateBuckets.has("api:10.0.0.8")).toBe(false);
+    expect(t.app.rateBuckets.has("api:10.0.0.9")).toBe(true);
+  });
+
   it("resets after RATE_LIMIT_WINDOW_MS", async () => {
     await statuses(6, () => health("10.0.0.6"));
     await new Promise((resolve) => setTimeout(resolve, 1100));

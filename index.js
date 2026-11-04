@@ -331,11 +331,22 @@ function requestLogger(req, res, next) {
   next();
 }
 
+let nextRateBucketPurgeAt = 0;
+
+function purgeExpiredRateBuckets(now) {
+  if (now < nextRateBucketPurgeAt) return;
+  nextRateBucketPurgeAt = now + RATE_LIMIT_WINDOW_MS;
+  for (const [key, bucket] of rateBuckets) {
+    if (bucket.resetAt <= now) rateBuckets.delete(key);
+  }
+}
+
 function rateLimit(req, res, next) {
   const isAuthRoute = req.path.startsWith("/auth/");
   const max = isAuthRoute ? RATE_LIMIT_AUTH_MAX : RATE_LIMIT_MAX;
   const key = `${isAuthRoute ? "auth" : "api"}:${req.ip}`;
   const now = Date.now();
+  purgeExpiredRateBuckets(now);
   const bucket = rateBuckets.get(key) || { count: 0, resetAt: now + RATE_LIMIT_WINDOW_MS };
 
   if (bucket.resetAt <= now) {
@@ -955,5 +966,6 @@ if (require.main === module) {
 }
 
 module.exports = app;
+module.exports.rateBuckets = rateBuckets;
 
 
