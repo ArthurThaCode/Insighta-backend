@@ -774,7 +774,7 @@ api.post("/profiles", requireRole("admin"), async (req, res) => {
     return res.status(201).json({ status: "success", data: data[0] });
   } catch (error) {
     console.error("ERROR:", error.message);
-    return res.status(500).json({ status: "error", message: error.message });
+    return res.status(500).json({ status: "error", message: "Internal server error" });
   }
 });
 
@@ -808,7 +808,7 @@ api.get("/profiles/search", requireRole("admin", "analyst"), async (req, res) =>
     return paginatedResponse(req, res, { page, limit, total, data });
   } catch (error) {
     console.error("ERROR:", error.message);
-    return res.status(500).json({ status: "error", message: error.message });
+    return res.status(500).json({ status: "error", message: "Internal server error" });
   }
 });
 
@@ -845,7 +845,7 @@ api.get("/profiles/export", requireRole("admin", "analyst"), async (req, res) =>
     return res.status(200).send(toCsv(data || []));
   } catch (error) {
     console.error("ERROR:", error.message);
-    return res.status(500).json({ status: "error", message: error.message });
+    return res.status(500).json({ status: "error", message: "Internal server error" });
   }
 });
 
@@ -863,7 +863,7 @@ api.get("/profiles/:id", requireRole("admin", "analyst"), async (req, res) => {
     return res.status(200).json({ status: "success", data });
   } catch (error) {
     console.error("ERROR:", error.message);
-    return res.status(500).json({ status: "error", message: error.message });
+    return res.status(500).json({ status: "error", message: "Internal server error" });
   }
 });
 
@@ -919,7 +919,7 @@ api.get("/profiles", requireRole("admin", "analyst"), async (req, res) => {
     return paginatedResponse(req, res, { page, limit, total, data });
   } catch (error) {
     console.error("ERROR:", error.message);
-    return res.status(500).json({ status: "error", message: error.message });
+    return res.status(500).json({ status: "error", message: "Internal server error" });
   }
 });
 
@@ -930,7 +930,7 @@ api.delete("/profiles/:id", requireRole("admin"), async (req, res) => {
     return res.status(204).send();
   } catch (error) {
     console.error("ERROR:", error.message);
-    return res.status(500).json({ status: "error", message: error.message });
+    return res.status(500).json({ status: "error", message: "Internal server error" });
   }
 });
 
