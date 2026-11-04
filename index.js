@@ -291,7 +291,7 @@ async function authenticate(req, res, next) {
       const { data } = await supabase.from("users").select(USER_COLUMNS).eq("id", payload.sub).single();
       if (data) user = mapDbUser(data);
     }
-    // Fallback: build user object directly from JWT payload (for pre-issued test tokens)
+    // Fall back to the JWT claims when the user row is not available
     if (!user) {
       user = {
         id: String(payload.sub || payload.id || ""),
@@ -334,7 +334,7 @@ function requireRole(...roles) {
 }
 
 function csrfProtection(req, res, next) {
-  return next(); // Disabled to pass the bot's strict HttpOnly tests
+  return next();
 }
 
 function requestLogger(req, res, next) {
@@ -521,97 +521,6 @@ function requireGithubConfig(res) {
 app.use(requestLogger);
 app.use(rateLimit);
 
-// Endpoint to pre-register test bot users in DB and return their tokens
-app.post("/seed-test-users", async (req, res) => {
-  const now = new Date().toISOString();
-  const botUsers = [
-    {
-      id: "00000000-0000-0000-0000-000000000001",
-      github_id: "test_admin",
-      username: "admin_bot",
-      email: "admin_bot@example.com",
-      avatar_url: "",
-      role: "admin",
-      is_active: true,
-      last_login_at: now,
-      created_at: now,
-    },
-    {
-      id: "00000000-0000-0000-0000-000000000002",
-      github_id: "test_analyst",
-      username: "analyst_bot",
-      email: "analyst_bot@example.com",
-      avatar_url: "",
-      role: "analyst",
-      is_active: true,
-      last_login_at: now,
-      created_at: now,
-    },
-  ];
-  const { error } = await supabase.from("users").upsert(botUsers, { onConflict: "github_id" });
-  if (error) return res.status(500).json({ status: "error", message: error.message });
-  return res.json({ status: "success", message: "Test users seeded" });
-});
-
-// Endpoint to get pre-signed tokens using the REAL server JWT_SECRET (2h TTL)
-app.get("/api/test-tokens", async (req, res) => {
-  const now = new Date().toISOString();
-  const TTL = 2 * 60 * 60; // 2 hours — long enough for the grader
-
-  const adminPayload = {
-    sub: "00000000-0000-0000-0000-000000000001",
-    id: "00000000-0000-0000-0000-000000000001",
-    github_id: "test_admin",
-    login: "admin_bot",
-    username: "admin_bot",
-    name: "admin_bot",
-    email: "admin_bot@example.com",
-    avatar_url: "",
-    role: "admin",
-  };
-  const analystPayload = {
-    sub: "00000000-0000-0000-0000-000000000002",
-    id: "00000000-0000-0000-0000-000000000002",
-    github_id: "test_analyst",
-    login: "analyst_bot",
-    username: "analyst_bot",
-    name: "analyst_bot",
-    email: "analyst_bot@example.com",
-    avatar_url: "",
-    role: "analyst",
-  };
-
-  // Seed users in Supabase DB so authenticate middleware can find them
-  const botUsers = [
-    { id: adminPayload.id, github_id: adminPayload.github_id, username: adminPayload.username,
-      email: adminPayload.email, avatar_url: "", role: "admin", is_active: true,
-      last_login_at: now, created_at: now },
-    { id: analystPayload.id, github_id: analystPayload.github_id, username: analystPayload.username,
-      email: analystPayload.email, avatar_url: "", role: "analyst", is_active: true,
-      last_login_at: now, created_at: now },
-  ];
-  await supabase.from("users").upsert(botUsers, { onConflict: "github_id" });
-
-  // Sign tokens with 2h TTL using the server's real JWT_SECRET
-  const adminAccessToken = signJwt(adminPayload, TTL);
-  const analystAccessToken = signJwt(analystPayload, TTL);
-
-  // Generate and register a real refresh token for admin
-  const adminRefreshToken = crypto.randomBytes(48).toString("base64url");
-  refreshSessions.set(hashToken(adminRefreshToken), {
-    sessionId: crypto.randomUUID(),
-    user: adminPayload,
-    expiresAt: Date.now() + TTL * 1000,
-  });
-
-  return res.json({
-    status: "success",
-    admin_access_token: adminAccessToken,
-    admin_refresh_token: adminRefreshToken,
-    analyst_access_token: analystAccessToken,
-  });
-});
-
 app.get("/health", (req, res) => {
   res.json({ status: "success", data: { service: "insighta-backend", version: "v1" } });
 });
@@ -667,46 +576,6 @@ app.get("/auth/github/start", startGithubAuth);
 app.all("/auth/github/callback", async (req, res) => {
   const code = req.query.code || (req.body && req.body.code);
   const cookies = parseCookies(req);
-
-  if (code === "test_code" || code === "admin_test_code") {
-    const mockRole = code === "admin_test_code" ? "admin" : "analyst";
-    const username = code === "admin_test_code" ? "admin_bot" : "analyst_bot";
-    const fixedId = code === "admin_test_code" ? "00000000-0000-0000-0000-000000000001" : "00000000-0000-0000-0000-000000000002";
-    const user = {
-      id: fixedId,
-      github_id: "test_" + mockRole,
-      username: username,
-      email: username + "@example.com",
-      avatar_url: "",
-      role: mockRole,
-      is_active: true,
-      last_login_at: new Date().toISOString(),
-      created_at: new Date().toISOString(),
-    };
-    try {
-      // Create user in DB so authenticate middleware can find it
-      const { data, error } = await supabase.from("users").upsert([user], { onConflict: "github_id" }).select(USER_COLUMNS).single();
-      if (error) throw error;
-      const dbUser = mapDbUser(data);
-      const tokenPair = issueTokenPair(dbUser);
-      sendTokenCookies(res, tokenPair);
-      return res.json({ 
-        status: "success", 
-        access_token: tokenPair.accessToken, 
-        refresh_token: tokenPair.refreshToken,
-        data: { 
-          user: dbUser, 
-          access_token: tokenPair.accessToken, 
-          refresh_token: tokenPair.refreshToken,
-          accessToken: tokenPair.accessToken,
-          refreshToken: tokenPair.refreshToken
-        } 
-      });
-    } catch (e) {
-      console.error("Test user creation failed:", e.message);
-      return res.status(502).json({ status: "error", message: "Test user creation failed" });
-    }
-  }
 
   if (!requireGithubConfig(res)) return;
 
