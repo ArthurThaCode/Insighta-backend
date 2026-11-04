@@ -522,6 +522,15 @@ app.get("/health", (req, res) => {
   res.json({ status: "success", data: { service: "insighta-backend", version: "v1" } });
 });
 
+function isLoopbackRedirect(value) {
+  try {
+    const url = new URL(value);
+    return url.protocol === "http:" && ["127.0.0.1", "localhost"].includes(url.hostname) && url.port !== "";
+  } catch {
+    return false;
+  }
+}
+
 function startGithubAuth(req, res) {
   if (!requireGithubConfig(res)) return;
 
@@ -532,7 +541,10 @@ function startGithubAuth(req, res) {
   const challenge = mode === "cli" ? req.query.code_challenge : buildPkceChallenge(verifier);
   if (!challenge) return res.status(400).json({ status: "error", message: "code_challenge required" });
   const redirectUri =
-    req.query.redirect_uri || process.env.GITHUB_REDIRECT_URI || `${WEB_ORIGIN}/auth/github/callback`;
+    mode === "cli" ? req.query.redirect_uri : process.env.GITHUB_REDIRECT_URI || `${WEB_ORIGIN}/auth/github/callback`;
+  if (mode === "cli" && !isLoopbackRedirect(redirectUri)) {
+    return res.status(400).json({ status: "error", message: "redirect_uri must be a local loopback address" });
+  }
 
   oauthStates.set(state, {
     mode,
