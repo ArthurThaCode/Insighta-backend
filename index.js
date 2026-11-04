@@ -316,7 +316,18 @@ function requireRole(...roles) {
   };
 }
 
+function hasValidCsrfToken(req) {
+  const cookieToken = parseCookies(req).insighta_csrf;
+  const headerToken = req.headers["x-csrf-token"];
+  if (!cookieToken || typeof headerToken !== "string") return false;
+  const expected = Buffer.from(cookieToken);
+  const received = Buffer.from(headerToken);
+  return expected.length === received.length && crypto.timingSafeEqual(expected, received);
+}
+
 function csrfProtection(req, res, next) {
+  if (req.authSource !== "cookie" || !MUTATING_METHODS.has(req.method)) return next();
+  if (!hasValidCsrfToken(req)) return res.status(403).json({ status: "error", message: "Invalid CSRF token" });
   return next();
 }
 
@@ -639,7 +650,7 @@ app.post("/auth/refresh", (req, res) => {
     data: { user: session.user, access_token: tokenPair.accessToken, refresh_token: tokenPair.refreshToken },
   };
   if (cookies.insighta_refresh) {
-    sendTokenCookies(res, tokenPair);
+    response.csrf_token = sendTokenCookies(res, tokenPair);
   }
   return res.json(response);
 });
@@ -647,7 +658,11 @@ app.all("/auth/refresh", (req, res) => res.status(405).json({ status: "error", m
 
 app.post("/auth/logout", (req, res) => {
   const cookies = parseCookies(req);
-  const refreshToken = (req.body && req.body.refresh_token) || cookies.insighta_refresh;
+  const bodyToken = req.body && req.body.refresh_token;
+  if (!bodyToken && cookies.insighta_refresh && !hasValidCsrfToken(req)) {
+    return res.status(403).json({ status: "error", message: "Invalid CSRF token" });
+  }
+  const refreshToken = bodyToken || cookies.insighta_refresh;
   if (refreshToken) refreshSessions.delete(hashToken(refreshToken));
   clearAuthCookies(res);
   return res.status(204).send();
@@ -679,7 +694,8 @@ api.get("/users/me", (req, res) => {
 });
 
 api.get("/session/me", (req, res) => {
-  res.json({ status: "success", data: { user: req.user } });
+  const csrfToken = req.authSource === "cookie" ? parseCookies(req).insighta_csrf || null : null;
+  res.json({ status: "success", data: { user: req.user, csrf_token: csrfToken } });
 });
 
 api.post("/profiles", requireRole("admin"), async (req, res) => {
