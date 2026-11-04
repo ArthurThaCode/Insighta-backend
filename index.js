@@ -15,7 +15,7 @@ const PORT = process.env.PORT || 3000;
 const WEB_ORIGIN = process.env.WEB_ORIGIN || `http://localhost:${PORT}`;
 const ACCESS_TOKEN_TTL_SECONDS = Number(process.env.ACCESS_TOKEN_TTL_SECONDS || 3 * 60);
 const REFRESH_TOKEN_TTL_SECONDS = Number(process.env.REFRESH_TOKEN_TTL_SECONDS || 5 * 60);
-const JWT_SECRET = process.env.JWT_SECRET || "dev-only-change-me-before-deploying";
+const JWT_SECRET = process.env.JWT_SECRET;
 const GITHUB_CLIENT_ID = process.env.GITHUB_CLIENT_ID;
 const GITHUB_CLIENT_SECRET = process.env.GITHUB_CLIENT_SECRET;
 const DEFAULT_ROLE = process.env.DEFAULT_ROLE || "analyst";
@@ -26,8 +26,9 @@ const ADMIN_LOGINS = new Set(
     .filter(Boolean)
 );
 
-if (JWT_SECRET === "dev-only-change-me-before-deploying") {
-  console.warn("JWT_SECRET is not set. Development tokens are not safe for production.");
+if (!JWT_SECRET) {
+  console.error("JWT_SECRET is required. Set it to a long random value before starting the server.");
+  process.exit(1);
 }
 
 app.set("trust proxy", 1);
