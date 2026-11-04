@@ -270,7 +270,7 @@ function sendTokenCookies(res, tokenPair) {
 
 function clearAuthCookies(res) {
   for (const name of ["insighta_access", "insighta_refresh", "insighta_csrf", "insighta_pkce_state", "insighta_pkce_verifier"]) {
-    res.clearCookie(name, { path: "/" });
+    res.clearCookie(name, { path: "/", httpOnly: true, secure: true, sameSite: "none" });
   }
 }
 
