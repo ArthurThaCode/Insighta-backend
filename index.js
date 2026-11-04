@@ -119,21 +119,6 @@ function hashToken(token) {
   return crypto.createHash("sha256").update(token).digest("hex");
 }
 
-function toCsv(rows) {
-  const headers = ["id", "name", "gender", "gender_probability", "age", "age_group", "country_id", "country_name", "country_probability", "created_at"];
-  const lines = [headers.join(",")];
-  for (const row of rows) {
-    const values = headers.map(h => {
-      const val = row[h];
-      if (val === null || val === undefined) return "";
-      const str = String(val).replace(/"/g, '""');
-      return str.includes(",") || str.includes('"') || str.includes("\n") ? `"${str}"` : str;
-    });
-    lines.push(values.join(","));
-  }
-  return lines.join("\n");
-}
-
 function parseCookies(req) {
   return Object.fromEntries(
     String(req.headers.cookie || "")
@@ -145,16 +130,6 @@ function parseCookies(req) {
         return [decodeURIComponent(part.slice(0, index)), decodeURIComponent(part.slice(index + 1))];
       })
   );
-}
-
-function cookieOptions({ httpOnly = true, maxAgeSeconds = 900 } = {}) {
-  return {
-    httpOnly: true,
-    secure: true,
-    sameSite: "none",
-    maxAge: maxAgeSeconds * 1000,
-    path: "/",
-  };
 }
 
 function determineRole(githubUser) {
