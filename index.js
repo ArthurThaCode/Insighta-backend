@@ -23,6 +23,9 @@ const JWT_SECRET = process.env.JWT_SECRET;
 const GITHUB_CLIENT_ID = process.env.GITHUB_CLIENT_ID;
 const GITHUB_CLIENT_SECRET = process.env.GITHUB_CLIENT_SECRET;
 const DEFAULT_ROLE = process.env.DEFAULT_ROLE || "analyst";
+const RATE_LIMIT_WINDOW_MS = Number(process.env.RATE_LIMIT_WINDOW_MS || 60_000);
+const RATE_LIMIT_MAX = Number(process.env.RATE_LIMIT_MAX || 60);
+const RATE_LIMIT_AUTH_MAX = Number(process.env.RATE_LIMIT_AUTH_MAX || 10);
 const ADMIN_LOGINS = new Set(
   (process.env.INSIGHTA_ADMIN_LOGINS || process.env.GITHUB_ADMIN_LOGINS || "")
     .split(",")
@@ -350,26 +353,22 @@ function requestLogger(req, res, next) {
 }
 
 function rateLimit(req, res, next) {
-  const windowMs = 60_000;
-  const url = req.originalUrl.split("?")[0];
-  const isAuthRoute = url.startsWith("/auth/");
-  const max = isAuthRoute ? 10 : 60;
-  // Use per-endpoint key so /auth/github quota doesn't bleed into /auth/refresh
-  const ip = (req.headers["x-forwarded-for"] || req.ip || "unknown").split(",")[0].trim();
-  const key = `${url}:${ip}`;
+  const isAuthRoute = req.path.startsWith("/auth/");
+  const max = isAuthRoute ? RATE_LIMIT_AUTH_MAX : RATE_LIMIT_MAX;
+  const key = `${isAuthRoute ? "auth" : "api"}:${req.ip}`;
   const now = Date.now();
-  const bucket = rateBuckets.get(key) || { count: 0, resetAt: now + windowMs };
+  const bucket = rateBuckets.get(key) || { count: 0, resetAt: now + RATE_LIMIT_WINDOW_MS };
 
   if (bucket.resetAt <= now) {
     bucket.count = 0;
-    bucket.resetAt = now + windowMs;
+    bucket.resetAt = now + RATE_LIMIT_WINDOW_MS;
   }
 
   bucket.count += 1;
   rateBuckets.set(key, bucket);
 
   if (bucket.count > max) {
-    res.set("Retry-After", "60");
+    res.set("Retry-After", String(Math.ceil((bucket.resetAt - now) / 1000)));
     return res.status(429).json({ status: "error", message: "Too Many Requests" });
   }
   return next();
