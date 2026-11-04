@@ -222,25 +222,13 @@ Every request is logged as JSON with timestamp, method, path, status, duration, 
 
 ## CI/CD
 
-A lightweight syntax check is available:
+`.github/workflows/ci.yml` runs these steps on Node.js 22. The project has no build step, so `npm run check` does a syntax check instead:
 
 ```bash
+npm ci
+npm run lint
 npm run check
+npm test
 ```
 
-Recommended CI pipeline:
-
-```yaml
-name: ci
-on: [push, pull_request]
-jobs:
-  check:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-      - run: npm ci
-      - run: npm run check
-```
+The tests use Vitest and supertest on the real Express app, with a fake Supabase and a fake GitHub in `tests/fixtures`. They cover authentication, refresh rotation and revocation, RBAC, CSRF, the rate limit, and the search parser. They do not exercise real Supabase or GitHub.
