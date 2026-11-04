@@ -334,6 +334,10 @@ function csrfProtection(req, res, next) {
   return next();
 }
 
+function maskOAuthParams(url) {
+  return url.replace(/([?&](?:code|state|code_verifier)=)[^&]*/g, "$1***");
+}
+
 function requestLogger(req, res, next) {
   const start = Date.now();
   res.on("finish", () => {
@@ -341,7 +345,7 @@ function requestLogger(req, res, next) {
       JSON.stringify({
         ts: new Date().toISOString(),
         method: req.method,
-        path: req.originalUrl,
+        path: maskOAuthParams(req.originalUrl),
         status: res.statusCode,
         duration_ms: Date.now() - start,
         user: req.user ? req.user.login : null,
