@@ -527,8 +527,10 @@ function startGithubAuth(req, res) {
 
   const mode = req.query.interface === "cli" ? "cli" : "web";
   const state = crypto.randomBytes(24).toString("base64url");
-  const verifier = req.query.code_verifier || crypto.randomBytes(48).toString("base64url");
-  const challenge = req.query.code_challenge || buildPkceChallenge(verifier);
+  // The CLI keeps its own verifier and only sends the challenge; the server generates one for the browser flow.
+  const verifier = mode === "cli" ? null : crypto.randomBytes(48).toString("base64url");
+  const challenge = mode === "cli" ? req.query.code_challenge : buildPkceChallenge(verifier);
+  if (!challenge) return res.status(400).json({ status: "error", message: "code_challenge required" });
   const redirectUri =
     req.query.redirect_uri || process.env.GITHUB_REDIRECT_URI || `${WEB_ORIGIN}/auth/github/callback`;
 
@@ -553,7 +555,6 @@ function startGithubAuth(req, res) {
       data: {
         authorize_url: authorizeUrl.toString(),
         state,
-        code_verifier: verifier,
         redirect_uri: redirectUri,
       },
     });
@@ -584,7 +585,8 @@ app.all("/auth/github/callback", async (req, res) => {
   }
 
   oauthStates.delete(state);
-  const verifier = (req.body && req.body.code_verifier) || req.query.code_verifier || cookies.insighta_pkce_verifier || saved.verifier;
+  const verifier = saved.mode === "cli" ? req.body && req.body.code_verifier : cookies.insighta_pkce_verifier || saved.verifier;
+  if (!verifier) return res.status(400).json({ status: "error", message: "code_verifier required" });
 
   try {
     const tokenPayload = {
