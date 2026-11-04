@@ -168,7 +168,7 @@ async function createOrUpdateUserFromGithub(githubUser, githubToken) {
       });
       const primary = (emailRes.data || []).find((item) => item.primary) || (emailRes.data || [])[0];
       email = primary ? primary.email : null;
-    } catch (error) {
+    } catch {
       email = null;
     }
   }
@@ -273,7 +273,7 @@ async function authenticate(req, res, next) {
     req.authSource = bearer ? "bearer" : "cookie";
     req.user = user;
     return next();
-  } catch (error) {
+  } catch {
     return res.status(401).json({ status: "error", message: "Invalid or expired access token" });
   }
 }
@@ -729,7 +729,7 @@ api.post("/profiles", requireRole("admin"), async (req, res) => {
         axios.get(`https://api.agify.io?name=${encodeURIComponent(name.trim())}`),
         axios.get(`https://api.nationalize.io?name=${encodeURIComponent(name.trim())}`),
       ]);
-    } catch (err) {
+    } catch {
       return res.status(502).json({ status: "error", message: "Upstream or server failure" });
     }
 
