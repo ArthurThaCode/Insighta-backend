@@ -86,8 +86,17 @@ describe("profiles API", () => {
       ["gender=robot", 422],
       ["min_age=abc", 422],
       ["sort_by=name", 422],
+      ["min_age=40&max_age=30", 422],
     ])("rejects %s with %i", async (query, status) => {
       expect((await as(analyst, "get", `/api/v1/profiles?${query}`)).status).toBe(status);
+    });
+
+    it("accepts equal minimum and maximum ages", async () => {
+      expect((await as(analyst, "get", "/api/v1/profiles?min_age=30&max_age=30")).status).toBe(200);
+    });
+
+    it("rejects an inverted age range on export too", async () => {
+      expect((await as(analyst, "get", "/api/v1/profiles/export?min_age=40&max_age=30")).status).toBe(422);
     });
 
     it("exports filtered and sorted CSV", async () => {

@@ -402,6 +402,10 @@ function validateProfileQueryParams(query) {
     if (key === "limit" && number > 50) return { valid: false, status: 422, message: "Invalid query parameters" };
   }
 
+  if (min_age !== undefined && max_age !== undefined && Number(min_age) > Number(max_age)) {
+    return { valid: false, status: 422, message: "Invalid query parameters" };
+  }
+
   for (const value of [min_gender_probability, min_country_probability]) {
     if (value === undefined) continue;
     if (value === "") return { valid: false, status: 400, message: "Invalid query parameters" };
