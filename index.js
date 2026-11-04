@@ -13,6 +13,10 @@ const app = express();
 
 const PORT = process.env.PORT || 3000;
 const WEB_ORIGIN = process.env.WEB_ORIGIN || `http://localhost:${PORT}`;
+const CORS_ORIGINS = (process.env.CORS_ORIGIN || WEB_ORIGIN)
+  .split(",")
+  .map((origin) => origin.trim())
+  .filter(Boolean);
 const ACCESS_TOKEN_TTL_SECONDS = Number(process.env.ACCESS_TOKEN_TTL_SECONDS || 3 * 60);
 const REFRESH_TOKEN_TTL_SECONDS = Number(process.env.REFRESH_TOKEN_TTL_SECONDS || 5 * 60);
 const JWT_SECRET = process.env.JWT_SECRET;
@@ -33,11 +37,9 @@ if (!JWT_SECRET) {
 
 app.set("trust proxy", 1);
 app.use(
-  cors({
-    origin: function (origin, callback) {
-      callback(null, origin || "*");
-    },
-    credentials: true,
+  cors((req, callback) => {
+    const allowed = CORS_ORIGINS.includes(req.headers.origin);
+    callback(null, { origin: allowed, credentials: allowed });
   })
 );
 app.use(express.json());
