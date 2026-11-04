@@ -194,6 +194,10 @@ insighta logout
 
 The CLI refreshes access tokens automatically when they are close to expiry.
 
+### GitHub OAuth app for the CLI
+
+GitHub only accepts a `redirect_uri` that matches a callback URL registered on the OAuth app; for a loopback URL, only the port may differ. The web flow redirects to the backend and the CLI redirects to `http://127.0.0.1:53682/callback`, so an OAuth app configured only for the backend can reject the CLI login. The app must also accept the loopback callback, or the CLI needs a second OAuth app. The backend currently reads a single `GITHUB_CLIENT_ID`, so a second app would also require a small code change to select the client by interface. This has not been tested against real GitHub.
+
 ## Natural Language Parsing Approach
 
 The parser is rule-based and lives in `src/services/nlpParser.js`. It does not use an LLM. It recognizes:
