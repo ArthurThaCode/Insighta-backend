@@ -13,12 +13,19 @@ const app = express();
 
 const PORT = process.env.PORT || 3000;
 const WEB_ORIGIN = process.env.WEB_ORIGIN || `http://localhost:${PORT}`;
+const CORS_ORIGINS = (process.env.CORS_ORIGIN || WEB_ORIGIN)
+  .split(",")
+  .map((origin) => origin.trim())
+  .filter(Boolean);
 const ACCESS_TOKEN_TTL_SECONDS = Number(process.env.ACCESS_TOKEN_TTL_SECONDS || 3 * 60);
 const REFRESH_TOKEN_TTL_SECONDS = Number(process.env.REFRESH_TOKEN_TTL_SECONDS || 5 * 60);
-const JWT_SECRET = process.env.JWT_SECRET || "dev-only-change-me-before-deploying";
+const JWT_SECRET = process.env.JWT_SECRET;
 const GITHUB_CLIENT_ID = process.env.GITHUB_CLIENT_ID;
 const GITHUB_CLIENT_SECRET = process.env.GITHUB_CLIENT_SECRET;
 const DEFAULT_ROLE = process.env.DEFAULT_ROLE || "analyst";
+const RATE_LIMIT_WINDOW_MS = Number(process.env.RATE_LIMIT_WINDOW_MS || 60_000);
+const RATE_LIMIT_MAX = Number(process.env.RATE_LIMIT_MAX || 60);
+const RATE_LIMIT_AUTH_MAX = Number(process.env.RATE_LIMIT_AUTH_MAX || 10);
 const ADMIN_LOGINS = new Set(
   (process.env.INSIGHTA_ADMIN_LOGINS || process.env.GITHUB_ADMIN_LOGINS || "")
     .split(",")
@@ -26,17 +33,16 @@ const ADMIN_LOGINS = new Set(
     .filter(Boolean)
 );
 
-if (JWT_SECRET === "dev-only-change-me-before-deploying") {
-  console.warn("JWT_SECRET is not set. Development tokens are not safe for production.");
+if (!JWT_SECRET) {
+  console.error("JWT_SECRET is required. Set it to a long random value before starting the server.");
+  process.exit(1);
 }
 
 app.set("trust proxy", 1);
 app.use(
-  cors({
-    origin: function (origin, callback) {
-      callback(null, origin || "*");
-    },
-    credentials: true,
+  cors((req, callback) => {
+    const allowed = CORS_ORIGINS.includes(req.headers.origin);
+    callback(null, { origin: allowed, credentials: allowed });
   })
 );
 app.use(express.json());
@@ -113,21 +119,6 @@ function hashToken(token) {
   return crypto.createHash("sha256").update(token).digest("hex");
 }
 
-function toCsv(rows) {
-  const headers = ["id", "name", "gender", "gender_probability", "age", "age_group", "country_id", "country_name", "country_probability", "created_at"];
-  const lines = [headers.join(",")];
-  for (const row of rows) {
-    const values = headers.map(h => {
-      const val = row[h];
-      if (val === null || val === undefined) return "";
-      const str = String(val).replace(/"/g, '""');
-      return str.includes(",") || str.includes('"') || str.includes("\n") ? `"${str}"` : str;
-    });
-    lines.push(values.join(","));
-  }
-  return lines.join("\n");
-}
-
 function parseCookies(req) {
   return Object.fromEntries(
     String(req.headers.cookie || "")
@@ -139,16 +130,6 @@ function parseCookies(req) {
         return [decodeURIComponent(part.slice(0, index)), decodeURIComponent(part.slice(index + 1))];
       })
   );
-}
-
-function cookieOptions({ httpOnly = true, maxAgeSeconds = 900 } = {}) {
-  return {
-    httpOnly: true,
-    secure: true,
-    sameSite: "none",
-    maxAge: maxAgeSeconds * 1000,
-    path: "/",
-  };
 }
 
 function determineRole(githubUser) {
@@ -187,7 +168,7 @@ async function createOrUpdateUserFromGithub(githubUser, githubToken) {
       });
       const primary = (emailRes.data || []).find((item) => item.primary) || (emailRes.data || [])[0];
       email = primary ? primary.email : null;
-    } catch (error) {
+    } catch {
       email = null;
     }
   }
@@ -267,7 +248,7 @@ function sendTokenCookies(res, tokenPair) {
 
 function clearAuthCookies(res) {
   for (const name of ["insighta_access", "insighta_refresh", "insighta_csrf", "insighta_pkce_state", "insighta_pkce_verifier"]) {
-    res.clearCookie(name, { path: "/" });
+    res.clearCookie(name, { path: "/", httpOnly: true, secure: true, sameSite: "none" });
   }
 }
 
@@ -285,34 +266,14 @@ async function authenticate(req, res, next) {
 
   try {
     const payload = verifyJwt(token);
-    // Try to find user in DB first
-    let user = null;
-    if (payload.sub) {
-      const { data } = await supabase.from("users").select(USER_COLUMNS).eq("id", payload.sub).single();
-      if (data) user = mapDbUser(data);
-    }
-    // Fallback: build user object directly from JWT payload (for pre-issued test tokens)
-    if (!user) {
-      user = {
-        id: String(payload.sub || payload.id || ""),
-        github_id: String(payload.github_id || ""),
-        login: String(payload.login || payload.username || ""),
-        username: String(payload.username || payload.login || ""),
-        name: String(payload.name || payload.username || ""),
-        email: String(payload.email || ""),
-        avatar_url: String(payload.avatar_url || ""),
-        role: String(payload.role || "analyst"),
-        is_active: true,
-      };
-      if (!user.id || !user.role) {
-        return res.status(401).json({ status: "error", message: "Invalid user session" });
-      }
-    }
+    const row = payload.sub ? await findUserById(payload.sub) : null;
+    if (!row) return res.status(401).json({ status: "error", message: "Invalid user session" });
+    const user = mapDbUser(row);
     if (user.is_active === false) return res.status(403).json({ status: "error", message: "User account is inactive" });
     req.authSource = bearer ? "bearer" : "cookie";
     req.user = user;
     return next();
-  } catch (error) {
+  } catch {
     return res.status(401).json({ status: "error", message: "Invalid or expired access token" });
   }
 }
@@ -333,8 +294,23 @@ function requireRole(...roles) {
   };
 }
 
+function hasValidCsrfToken(req) {
+  const cookieToken = parseCookies(req).insighta_csrf;
+  const headerToken = req.headers["x-csrf-token"];
+  if (!cookieToken || typeof headerToken !== "string") return false;
+  const expected = Buffer.from(cookieToken);
+  const received = Buffer.from(headerToken);
+  return expected.length === received.length && crypto.timingSafeEqual(expected, received);
+}
+
 function csrfProtection(req, res, next) {
-  return next(); // Disabled to pass the bot's strict HttpOnly tests
+  if (req.authSource !== "cookie" || !MUTATING_METHODS.has(req.method)) return next();
+  if (!hasValidCsrfToken(req)) return res.status(403).json({ status: "error", message: "Invalid CSRF token" });
+  return next();
+}
+
+function maskOAuthParams(url) {
+  return url.replace(/([?&](?:code|state|code_verifier)=)[^&]*/g, "$1***");
 }
 
 function requestLogger(req, res, next) {
@@ -344,7 +320,7 @@ function requestLogger(req, res, next) {
       JSON.stringify({
         ts: new Date().toISOString(),
         method: req.method,
-        path: req.originalUrl,
+        path: maskOAuthParams(req.originalUrl),
         status: res.statusCode,
         duration_ms: Date.now() - start,
         user: req.user ? req.user.login : null,
@@ -355,27 +331,34 @@ function requestLogger(req, res, next) {
   next();
 }
 
+let nextRateBucketPurgeAt = 0;
+
+function purgeExpiredRateBuckets(now) {
+  if (now < nextRateBucketPurgeAt) return;
+  nextRateBucketPurgeAt = now + RATE_LIMIT_WINDOW_MS;
+  for (const [key, bucket] of rateBuckets) {
+    if (bucket.resetAt <= now) rateBuckets.delete(key);
+  }
+}
+
 function rateLimit(req, res, next) {
-  const windowMs = 60_000;
-  const url = req.originalUrl.split("?")[0];
-  const isAuthRoute = url.startsWith("/auth/");
-  const max = isAuthRoute ? 10 : 60;
-  // Use per-endpoint key so /auth/github quota doesn't bleed into /auth/refresh
-  const ip = (req.headers["x-forwarded-for"] || req.ip || "unknown").split(",")[0].trim();
-  const key = `${url}:${ip}`;
+  const isAuthRoute = req.path.startsWith("/auth/");
+  const max = isAuthRoute ? RATE_LIMIT_AUTH_MAX : RATE_LIMIT_MAX;
+  const key = `${isAuthRoute ? "auth" : "api"}:${req.ip}`;
   const now = Date.now();
-  const bucket = rateBuckets.get(key) || { count: 0, resetAt: now + windowMs };
+  purgeExpiredRateBuckets(now);
+  const bucket = rateBuckets.get(key) || { count: 0, resetAt: now + RATE_LIMIT_WINDOW_MS };
 
   if (bucket.resetAt <= now) {
     bucket.count = 0;
-    bucket.resetAt = now + windowMs;
+    bucket.resetAt = now + RATE_LIMIT_WINDOW_MS;
   }
 
   bucket.count += 1;
   rateBuckets.set(key, bucket);
 
   if (bucket.count > max) {
-    res.set("Retry-After", "60");
+    res.set("Retry-After", String(Math.ceil((bucket.resetAt - now) / 1000)));
     return res.status(429).json({ status: "error", message: "Too Many Requests" });
   }
   return next();
@@ -417,6 +400,10 @@ function validateProfileQueryParams(query) {
     if (Number.isNaN(number) || !Number.isInteger(number) || number < min)
       return { valid: false, status: 422, message: "Invalid query parameters" };
     if (key === "limit" && number > 50) return { valid: false, status: 422, message: "Invalid query parameters" };
+  }
+
+  if (min_age !== undefined && max_age !== undefined && Number(min_age) > Number(max_age)) {
+    return { valid: false, status: 422, message: "Invalid query parameters" };
   }
 
   for (const value of [min_gender_probability, min_country_probability]) {
@@ -521,110 +508,33 @@ function requireGithubConfig(res) {
 app.use(requestLogger);
 app.use(rateLimit);
 
-// Endpoint to pre-register test bot users in DB and return their tokens
-app.post("/seed-test-users", async (req, res) => {
-  const now = new Date().toISOString();
-  const botUsers = [
-    {
-      id: "00000000-0000-0000-0000-000000000001",
-      github_id: "test_admin",
-      username: "admin_bot",
-      email: "admin_bot@example.com",
-      avatar_url: "",
-      role: "admin",
-      is_active: true,
-      last_login_at: now,
-      created_at: now,
-    },
-    {
-      id: "00000000-0000-0000-0000-000000000002",
-      github_id: "test_analyst",
-      username: "analyst_bot",
-      email: "analyst_bot@example.com",
-      avatar_url: "",
-      role: "analyst",
-      is_active: true,
-      last_login_at: now,
-      created_at: now,
-    },
-  ];
-  const { error } = await supabase.from("users").upsert(botUsers, { onConflict: "github_id" });
-  if (error) return res.status(500).json({ status: "error", message: error.message });
-  return res.json({ status: "success", message: "Test users seeded" });
-});
-
-// Endpoint to get pre-signed tokens using the REAL server JWT_SECRET (2h TTL)
-app.get("/api/test-tokens", async (req, res) => {
-  const now = new Date().toISOString();
-  const TTL = 2 * 60 * 60; // 2 hours — long enough for the grader
-
-  const adminPayload = {
-    sub: "00000000-0000-0000-0000-000000000001",
-    id: "00000000-0000-0000-0000-000000000001",
-    github_id: "test_admin",
-    login: "admin_bot",
-    username: "admin_bot",
-    name: "admin_bot",
-    email: "admin_bot@example.com",
-    avatar_url: "",
-    role: "admin",
-  };
-  const analystPayload = {
-    sub: "00000000-0000-0000-0000-000000000002",
-    id: "00000000-0000-0000-0000-000000000002",
-    github_id: "test_analyst",
-    login: "analyst_bot",
-    username: "analyst_bot",
-    name: "analyst_bot",
-    email: "analyst_bot@example.com",
-    avatar_url: "",
-    role: "analyst",
-  };
-
-  // Seed users in Supabase DB so authenticate middleware can find them
-  const botUsers = [
-    { id: adminPayload.id, github_id: adminPayload.github_id, username: adminPayload.username,
-      email: adminPayload.email, avatar_url: "", role: "admin", is_active: true,
-      last_login_at: now, created_at: now },
-    { id: analystPayload.id, github_id: analystPayload.github_id, username: analystPayload.username,
-      email: analystPayload.email, avatar_url: "", role: "analyst", is_active: true,
-      last_login_at: now, created_at: now },
-  ];
-  await supabase.from("users").upsert(botUsers, { onConflict: "github_id" });
-
-  // Sign tokens with 2h TTL using the server's real JWT_SECRET
-  const adminAccessToken = signJwt(adminPayload, TTL);
-  const analystAccessToken = signJwt(analystPayload, TTL);
-
-  // Generate and register a real refresh token for admin
-  const adminRefreshToken = crypto.randomBytes(48).toString("base64url");
-  refreshSessions.set(hashToken(adminRefreshToken), {
-    sessionId: crypto.randomUUID(),
-    user: adminPayload,
-    expiresAt: Date.now() + TTL * 1000,
-  });
-
-  return res.json({
-    status: "success",
-    admin_access_token: adminAccessToken,
-    admin_refresh_token: adminRefreshToken,
-    analyst_access_token: analystAccessToken,
-  });
-});
-
 app.get("/health", (req, res) => {
   res.json({ status: "success", data: { service: "insighta-backend", version: "v1" } });
 });
+
+function isLoopbackRedirect(value) {
+  try {
+    const url = new URL(value);
+    return url.protocol === "http:" && ["127.0.0.1", "localhost"].includes(url.hostname) && url.port !== "";
+  } catch {
+    return false;
+  }
+}
 
 function startGithubAuth(req, res) {
   if (!requireGithubConfig(res)) return;
 
   const mode = req.query.interface === "cli" ? "cli" : "web";
   const state = crypto.randomBytes(24).toString("base64url");
-  const verifier = req.query.code_verifier || crypto.randomBytes(48).toString("base64url");
-  const challenge = req.query.code_challenge || buildPkceChallenge(verifier);
+  // The CLI keeps its own verifier and only sends the challenge; the server generates one for the browser flow.
+  const verifier = mode === "cli" ? null : crypto.randomBytes(48).toString("base64url");
+  const challenge = mode === "cli" ? req.query.code_challenge : buildPkceChallenge(verifier);
+  if (!challenge) return res.status(400).json({ status: "error", message: "code_challenge required" });
   const redirectUri =
-    req.query.redirect_uri || process.env.GITHUB_REDIRECT_URI || `${WEB_ORIGIN}/auth/github/callback`;
+    mode === "cli" ? req.query.redirect_uri : process.env.GITHUB_REDIRECT_URI || `${WEB_ORIGIN}/auth/github/callback`;
+  if (mode === "cli" && !isLoopbackRedirect(redirectUri)) {
+    return res.status(400).json({ status: "error", message: "redirect_uri must be a local loopback address" });
+  }
 
   oauthStates.set(state, {
     mode,
@@ -647,7 +557,6 @@ function startGithubAuth(req, res) {
       data: {
         authorize_url: authorizeUrl.toString(),
         state,
-        code_verifier: verifier,
         redirect_uri: redirectUri,
       },
     });
@@ -668,57 +577,24 @@ app.all("/auth/github/callback", async (req, res) => {
   const code = req.query.code || (req.body && req.body.code);
   const cookies = parseCookies(req);
 
-  if (code === "test_code" || code === "admin_test_code") {
-    const mockRole = code === "admin_test_code" ? "admin" : "analyst";
-    const username = code === "admin_test_code" ? "admin_bot" : "analyst_bot";
-    const fixedId = code === "admin_test_code" ? "00000000-0000-0000-0000-000000000001" : "00000000-0000-0000-0000-000000000002";
-    const user = {
-      id: fixedId,
-      github_id: "test_" + mockRole,
-      username: username,
-      email: username + "@example.com",
-      avatar_url: "",
-      role: mockRole,
-      is_active: true,
-      last_login_at: new Date().toISOString(),
-      created_at: new Date().toISOString(),
-    };
-    try {
-      // Create user in DB so authenticate middleware can find it
-      const { data, error } = await supabase.from("users").upsert([user], { onConflict: "github_id" }).select(USER_COLUMNS).single();
-      if (error) throw error;
-      const dbUser = mapDbUser(data);
-      const tokenPair = issueTokenPair(dbUser);
-      sendTokenCookies(res, tokenPair);
-      return res.json({ 
-        status: "success", 
-        access_token: tokenPair.accessToken, 
-        refresh_token: tokenPair.refreshToken,
-        data: { 
-          user: dbUser, 
-          access_token: tokenPair.accessToken, 
-          refresh_token: tokenPair.refreshToken,
-          accessToken: tokenPair.accessToken,
-          refreshToken: tokenPair.refreshToken
-        } 
-      });
-    } catch (e) {
-      console.error("Test user creation failed:", e.message);
-      return res.status(502).json({ status: "error", message: "Test user creation failed" });
-    }
-  }
-
   if (!requireGithubConfig(res)) return;
 
-  const state = req.query.state || (req.body && req.body.state) || cookies.insighta_pkce_state;
+  const state = req.query.state || (req.body && req.body.state);
   const saved = oauthStates.get(state);
 
   if (!code || !state || !saved || saved.expiresAt < Date.now()) {
     return res.status(400).json({ status: "error", message: "Invalid or expired OAuth state" });
   }
 
+  // The browser finishing the login must be the one that started it, otherwise an attacker could
+  // make a victim's browser sign in to the attacker's account (login CSRF).
+  if (saved.mode !== "cli" && cookies.insighta_pkce_state !== state) {
+    return res.status(400).json({ status: "error", message: "Invalid or expired OAuth state" });
+  }
+
   oauthStates.delete(state);
-  const verifier = (req.body && req.body.code_verifier) || req.query.code_verifier || cookies.insighta_pkce_verifier || saved.verifier;
+  const verifier = saved.mode === "cli" ? req.body && req.body.code_verifier : cookies.insighta_pkce_verifier || saved.verifier;
+  if (!verifier) return res.status(400).json({ status: "error", message: "code_verifier required" });
 
   try {
     const tokenPayload = {
@@ -752,6 +628,7 @@ app.all("/auth/github/callback", async (req, res) => {
         status: "success", 
         access_token: tokenPair.accessToken,
         refresh_token: tokenPair.refreshToken,
+        expires_in: tokenPair.expiresIn,
         data: { 
           user, 
           access_token: tokenPair.accessToken,
@@ -784,10 +661,11 @@ app.post("/auth/refresh", (req, res) => {
     status: "success",
     access_token: tokenPair.accessToken,
     refresh_token: tokenPair.refreshToken,
+    expires_in: tokenPair.expiresIn,
     data: { user: session.user, access_token: tokenPair.accessToken, refresh_token: tokenPair.refreshToken },
   };
   if (cookies.insighta_refresh) {
-    sendTokenCookies(res, tokenPair);
+    response.csrf_token = sendTokenCookies(res, tokenPair);
   }
   return res.json(response);
 });
@@ -795,7 +673,11 @@ app.all("/auth/refresh", (req, res) => res.status(405).json({ status: "error", m
 
 app.post("/auth/logout", (req, res) => {
   const cookies = parseCookies(req);
-  const refreshToken = (req.body && req.body.refresh_token) || cookies.insighta_refresh;
+  const bodyToken = req.body && req.body.refresh_token;
+  if (!bodyToken && cookies.insighta_refresh && !hasValidCsrfToken(req)) {
+    return res.status(403).json({ status: "error", message: "Invalid CSRF token" });
+  }
+  const refreshToken = bodyToken || cookies.insighta_refresh;
   if (refreshToken) refreshSessions.delete(hashToken(refreshToken));
   clearAuthCookies(res);
   return res.status(204).send();
@@ -827,7 +709,8 @@ api.get("/users/me", (req, res) => {
 });
 
 api.get("/session/me", (req, res) => {
-  res.json({ status: "success", data: { user: req.user } });
+  const csrfToken = req.authSource === "cookie" ? parseCookies(req).insighta_csrf || null : null;
+  res.json({ status: "success", data: { user: req.user, csrf_token: csrfToken } });
 });
 
 api.post("/profiles", requireRole("admin"), async (req, res) => {
@@ -867,7 +750,7 @@ api.post("/profiles", requireRole("admin"), async (req, res) => {
         axios.get(`https://api.agify.io?name=${encodeURIComponent(name.trim())}`),
         axios.get(`https://api.nationalize.io?name=${encodeURIComponent(name.trim())}`),
       ]);
-    } catch (err) {
+    } catch {
       return res.status(502).json({ status: "error", message: "Upstream or server failure" });
     }
 
@@ -907,7 +790,7 @@ api.post("/profiles", requireRole("admin"), async (req, res) => {
     return res.status(201).json({ status: "success", data: data[0] });
   } catch (error) {
     console.error("ERROR:", error.message);
-    return res.status(500).json({ status: "error", message: error.message });
+    return res.status(500).json({ status: "error", message: "Internal server error" });
   }
 });
 
@@ -919,10 +802,15 @@ api.get("/profiles/search", requireRole("admin", "analyst"), async (req, res) =>
   }
 
   const result = parseNaturalLanguageQuery(q);
-  if (result.error) return res.status(400).json({ status: "error", message: result.error });
+  if (result.error) return res.status(result.status || 400).json({ status: "error", message: result.error });
 
-  const page = rawPage ? Math.max(1, parseInt(rawPage, 10) || 1) : 1;
-  const limit = rawLimit ? Math.min(50, Math.max(1, parseInt(rawLimit, 10) || 10)) : 10;
+  const validation = validateProfileQueryParams({ page: rawPage, limit: rawLimit });
+  if (!validation.valid) {
+    return res.status(validation.status).json({ status: "error", message: validation.message });
+  }
+
+  const page = rawPage ? parseInt(rawPage, 10) : 1;
+  const limit = rawLimit ? parseInt(rawLimit, 10) : 10;
   const offset = (page - 1) * limit;
 
   try {
@@ -941,7 +829,7 @@ api.get("/profiles/search", requireRole("admin", "analyst"), async (req, res) =>
     return paginatedResponse(req, res, { page, limit, total, data });
   } catch (error) {
     console.error("ERROR:", error.message);
-    return res.status(500).json({ status: "error", message: error.message });
+    return res.status(500).json({ status: "error", message: "Internal server error" });
   }
 });
 
@@ -978,7 +866,7 @@ api.get("/profiles/export", requireRole("admin", "analyst"), async (req, res) =>
     return res.status(200).send(toCsv(data || []));
   } catch (error) {
     console.error("ERROR:", error.message);
-    return res.status(500).json({ status: "error", message: error.message });
+    return res.status(500).json({ status: "error", message: "Internal server error" });
   }
 });
 
@@ -996,7 +884,7 @@ api.get("/profiles/:id", requireRole("admin", "analyst"), async (req, res) => {
     return res.status(200).json({ status: "success", data });
   } catch (error) {
     console.error("ERROR:", error.message);
-    return res.status(500).json({ status: "error", message: error.message });
+    return res.status(500).json({ status: "error", message: "Internal server error" });
   }
 });
 
@@ -1052,18 +940,19 @@ api.get("/profiles", requireRole("admin", "analyst"), async (req, res) => {
     return paginatedResponse(req, res, { page, limit, total, data });
   } catch (error) {
     console.error("ERROR:", error.message);
-    return res.status(500).json({ status: "error", message: error.message });
+    return res.status(500).json({ status: "error", message: "Internal server error" });
   }
 });
 
 api.delete("/profiles/:id", requireRole("admin"), async (req, res) => {
   try {
-    const { error } = await supabase.from("profiles").delete().eq("id", req.params.id);
-    if (error) throw error;
+    const { data, error } = await supabase.from("profiles").delete().eq("id", req.params.id).select("id");
+    if (error && error.code !== "22P02") throw error;
+    if (!data || data.length === 0) return res.status(404).json({ status: "error", message: "Profile not found" });
     return res.status(204).send();
   } catch (error) {
     console.error("ERROR:", error.message);
-    return res.status(500).json({ status: "error", message: error.message });
+    return res.status(500).json({ status: "error", message: "Internal server error" });
   }
 });
 
@@ -1074,8 +963,13 @@ app.use((req, res) => {
   res.status(404).json({ status: "error", message: "Route not found" });
 });
 
-app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-});
+if (require.main === module) {
+  app.listen(PORT, () => {
+    console.log(`Server running on port ${PORT}`);
+  });
+}
+
+module.exports = app;
+module.exports.rateBuckets = rateBuckets;
 
 
